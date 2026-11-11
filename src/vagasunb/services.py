@@ -16,7 +16,18 @@ from vagasunb.db import (
 )
 
 DEFAULTS = {
+    "timezone": "America/Sao_Paulo",
+    "registrations_open": True,
+    "closed_message": "Novos monitoramentos estão fechados. Você pode consultar, cancelar e apagar seus dados.",
+    "collection_auto": True,
+    "screen_interval": 3,
+    "schedule_register": {},
+    "schedule_collect": {},
+    "schedule_dispatch": {},
     "period": "DEMO.1",
+    "source": "demo",
+    "send_rate": 25,
+    "send_concurrency": 6,
     "window_end": "2099-12-31T23:59:59+00:00",
     "interval": 60,
     "structural_interval": 86400,
@@ -36,10 +47,11 @@ DEFAULTS = {
 
 
 async def verify_instance(s, vault, mode):
+    await lock(s, "instance", "bootstrap")
     marker = await s.get(Setting, "instance")
     proof = vault.index("0")
     if marker:
-        if marker.value["mode"] != mode or marker.value["key_check"] != proof:
+        if marker.value["key_check"] != proof:
             raise ValueError("Modo ou chave incompatível com o banco")
         if (
             marker.value.get("cipher_check")
@@ -69,7 +81,22 @@ async def options(s):
     return {**DEFAULTS, **(row.value if row else {})}
 
 
+async def detection_window(s, cfg, period):
+    """Compare across a measured catalog cadence; delivery keeps its short TTL."""
+    cycle = await s.get(Setting, "catalog_cycle_public")
+    if not cycle or cycle.value.get("period") != period:
+        return cfg["stale"]
+    value = cycle.value
+    if value.get("valid", 0) < 0.9 * max(1, value.get("processed", 0)):
+        return cfg["stale"]
+    return max(
+        cfg["stale"],
+        2 * max(cfg["interval"], value.get("last_duration_s", 0), value.get("duration_s", 0)),
+    )
+
+
 async def change_options(s, values):
+    await lock(s, "operations", "config")
     cfg = await options(s)
     for key, value in values.items():
         if key not in DEFAULTS:
@@ -88,7 +115,30 @@ async def change_options(s, values):
             type(value) is not int or not 0 <= value <= 86400
         ):
             raise ValueError("Valor fora do limite")
+        if key == "source" and value not in {"demo", "public"}:
+            raise ValueError("Fonte inválida")
+        if key in {"send_rate", "send_concurrency"} and (
+            type(value) is not int or not 1 <= value <= (29 if key == "send_rate" else 12)
+        ):
+            raise ValueError("Limite de distribuição inválido")
+        if key == "screen_interval" and (type(value) is not int or not 3 <= value <= 60):
+            raise ValueError("Atualização da tela deve ficar entre 3 e 60 segundos")
         cfg[key] = value
+    from vagasunb.schedule import validate
+
+    for key in ("schedule_register", "schedule_collect", "schedule_dispatch"):
+        validate(cfg[key], cfg["timezone"])
+    for key in (
+        "registrations_open",
+        "collection_auto",
+        "collect_paused",
+        "dispatch_paused",
+        "quarantine",
+    ):
+        if type(cfg[key]) is not bool:
+            raise ValueError("Opção ligada/desligada inválida")
+    if not isinstance(cfg["closed_message"], str) or not 1 <= len(cfg["closed_message"]) <= 240:
+        raise ValueError("Mensagem de fechamento deve ter de 1 a 240 caracteres")
     row = await s.get(Setting, "operations")
     if row:
         row.value = cfg
@@ -97,12 +147,16 @@ async def change_options(s, values):
     s.add(Event(category="config", code="updated", values={"fields": sorted(values)}))
 
 
-async def register(s, vault, chat_id):
+async def register(s, vault, chat_id, *, synthetic=True):
     await lock(s, "lookup", vault.index(chat_id))
     r = await s.scalar(select(Recipient).where(Recipient.lookup == vault.index(chat_id)))
     if r:
         return r
-    r = Recipient(cipher=vault.encrypt(str(int(chat_id))), lookup=vault.index(chat_id))
+    r = Recipient(
+        cipher=vault.encrypt(str(int(chat_id))),
+        lookup=vault.index(chat_id),
+        origin="demo" if synthetic else "private",
+    )
     s.add(r)
     await s.flush()
     return r
@@ -114,6 +168,10 @@ async def subscribe(s, rid, code, period, numbers):
     if not r:
         raise ValueError("Abra /start conscientemente para iniciar")
     cfg = await options(s)
+    from vagasunb.schedule import allowed
+
+    if not allowed(cfg, "register", now()):
+        raise ValueError(cfg["closed_message"])
     if now() >= datetime.fromisoformat(cfg["window_end"]):
         raise ValueError("Janela de monitoramento encerrada")
     if cfg["quarantine"] or period != cfg["period"]:
@@ -187,6 +245,12 @@ async def subscription_action(s, rid, sid, action, revision=None):
 async def erase(s, rid):
     # Dispatcher holds this lock across the send. Confirmation waits for any in-flight call.
     await lock(s, "recipient", rid)
+    await lock(s, "send", "budget")
+    budget = await s.get(Setting, "send_budget")
+    if budget and rid in budget.value.get("chats", {}):
+        value = dict(budget.value)
+        value["chats"] = {k: v for k, v in value["chats"].items() if k != rid}
+        budget.value = value
     r = await s.get(Recipient, rid)
     if r:
         await s.delete(r)
@@ -196,9 +260,7 @@ async def erase(s, rid):
 async def cleanup(s, at=None):
     at = at or now()
     cfg = await options(s)
-    if at >= datetime.fromisoformat(cfg["window_end"]):
-        await s.execute(delete(Subscription).where(Subscription.period == cfg["period"]))
-        s.add(Event(category="subscriptions", code="window_expired", values={}))
+    # Closing a window stops eligibility; subscriptions remain manageable.
     await s.execute(delete(Callback).where(Callback.expires < at))
     await s.execute(
         delete(Outbox).where(

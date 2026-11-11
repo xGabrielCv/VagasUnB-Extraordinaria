@@ -16,7 +16,7 @@ case "${1:-status}" in
     docker compose build
     docker compose up -d postgres
     docker compose run --rm migrate
-    docker compose run --rm admin python -m vagasunb.cli admin ;;
+    echo "Abra o painel e cadastre sua senha no primeiro acesso." ;;
   export)
     docker compose stop admin worker bot
     docker compose run --rm -v "$PWD/.private/exports:/exports" -v "$PWD/.private/secrets/backup_key:/run/backup_key:ro" admin python -m vagasunb.cli export --directory /exports --key /run/backup_key ;;

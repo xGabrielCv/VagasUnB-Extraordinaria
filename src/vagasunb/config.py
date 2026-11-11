@@ -1,5 +1,6 @@
 import json
 import os
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -13,6 +14,14 @@ class Settings:
     host: str = "127.0.0.1:8765"
     secure: bool = False
 
+    @property
+    def private_dir(self):
+        return Path(os.getenv("VAGAS_PRIVATE", ".private")).resolve()
+
+    @property
+    def instance(self):
+        return hashlib.sha256(str(self.private_dir).encode()).hexdigest()[:20]
+
     @classmethod
     def load(cls):
         root = Path(os.getenv("VAGAS_PRIVATE", ".private"))
@@ -22,6 +31,8 @@ class Settings:
             else {}
         )
         mode = os.getenv("VAGAS_MODE", cfg.get("mode", "demo"))
+        if mode == "telegram":
+            mode = "public"  # Transport activation no longer changes the catalog/database mode.
         if mode not in {"demo", "public", "telegram"}:
             raise ValueError("Modo inválido")
         url = os.getenv("DATABASE_URL", cfg.get("database_url", ""))
@@ -33,8 +44,6 @@ class Settings:
         db = url.rsplit("/", 1)[-1].split("?", 1)[0]
         if mode == "demo" and not db.endswith("_demo"):
             raise ValueError("Demo exige banco com sufixo _demo")
-        if mode != "demo" and db.endswith("_demo"):
-            raise ValueError("Banco demo não pode operar em modo real")
         return cls(
             mode,
             url,

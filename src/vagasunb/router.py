@@ -6,6 +6,7 @@ from html import escape
 from sqlalchemy import select
 
 from vagasunb.catalog import search
+from vagasunb.presentation import date_br, label as present
 from vagasunb.db import Callback, Classroom, Recipient, Subscription, lock, now
 from vagasunb.services import erase, options, register, subscribe, subscription_action
 
@@ -28,6 +29,21 @@ COMMANDS = [
 class View:
     text: str
     buttons: list = field(default_factory=list)
+
+    def __post_init__(self):
+        if len(self.text) > 3900:
+            from bs4 import BeautifulSoup
+
+            plain = BeautifulSoup(self.text, "html.parser").get_text()
+            chunks = []
+            length = 0
+            for char in plain:
+                encoded = escape(char)
+                if length + len(encoded) > 3800:
+                    break
+                chunks.append(encoded)
+                length += len(encoded)
+            self.text = "".join(chunks) + "…\nConsulte os detalhes no catálogo."
 
     def as_dict(self):
         return {"text": self.text, "buttons": self.buttons}
@@ -58,7 +74,7 @@ async def alert_view(s, rid, sid, classes):
     ]
     for c in classes:
         lines.append(
-            f"Turma {escape(c.number)} · {c.available} vaga(s)\n{escape((c.teachers or 'Não informado')[:100])} · {escape((c.schedule or 'Não informado')[:100])}\nObservado: {c.observed.isoformat()}"
+            f"Turma {escape(c.number)} · {c.available} vaga(s)\n{escape((c.teachers or 'Não informado')[:100])} · {escape((c.schedule or 'Não informado')[:100])}\nObservado: {date_br(c.observed)}"
         )
     lines.append("O alerta não garante disponibilidade. A matrícula é feita por você no SIGAA.")
     buttons = [{"label": "Abrir SIGAA", "url": SIGAA}]
@@ -70,17 +86,19 @@ async def alert_view(s, rid, sid, classes):
         buttons.append(
             await button(s, rid, label, "sub_action", sid=sid, op=action, revision=sub.revision)
         )
-    return View("\n\n".join(lines)[:3900], buttons)
+    return View("\n\n".join(lines), buttons)
 
 
-async def route(s, vault, chat_id, text="", callback=None, private=True, sender_matches=True):
+async def route(
+    s, vault, chat_id, text="", callback=None, private=True, sender_matches=True, synthetic=True
+):
     if not private or not sender_matches:
         return View("Use este serviço somente na sua conversa privada.")
     if len(text) > 120:
         return View("Entrada limitada a 120 caracteres.")
     r = await s.scalar(select(Recipient).where(Recipient.lookup == vault.index(chat_id)))
     if text == "/start":
-        r = await register(s, vault, chat_id)
+        r = await register(s, vault, chat_id, synthetic=synthetic)
     if not r:
         return View("Seus dados não estão cadastrados. Envie /start para iniciar conscientemente.")
     await lock(s, "recipient", r.id)
@@ -271,9 +289,9 @@ async def route(s, vault, chat_id, text="", callback=None, private=True, sender_
             return await finish("Turma ou período indisponível.")
         if action == "details":
             freshness = (
-                "STALE"
+                present("STALE")
                 if not c.observed or (now() - c.observed).total_seconds() > cfg["stale"]
-                else c.state
+                else present(c.state)
             )
             lines = [
                 f"📘 <b>{escape(c.name)}</b>",
@@ -281,7 +299,7 @@ async def route(s, vault, chat_id, text="", callback=None, private=True, sender_
                 f"Campus: {escape(c.campus or 'Campus não identificado')}\nUnidades: {escape(', '.join(c.units))}",
                 f"Docentes: {escape(c.teachers or 'Não informado')}\nHorário: {escape(c.schedule or 'Não informado')}\nLocal: {escape(c.location or 'Não informado')}",
                 f"Ofertadas: {c.offered if c.offered is not None else 'Não informado'} · Ocupadas: {c.occupied if c.occupied is not None else 'Não informado'}\nDisponibilidade: {c.available if c.available is not None else 'Não informado'} · {freshness}",
-                f"Última observação válida: {c.observed.isoformat() if c.observed else 'Não informado'}",
+                f"Última observação válida: {date_br(c.observed) if c.observed else 'Não informado'}",
             ]
             return await finish(
                 "\n\n".join(lines),
@@ -318,7 +336,7 @@ async def route(s, vault, chat_id, text="", callback=None, private=True, sender_
         )
         buttons = [
             await b(
-                f"{sub.code} · {sub.status} · {', '.join(sub.numbers) or 'Todas'}",
+                f"{sub.code} · {present(sub.status)} · {', '.join(sub.numbers) or 'Todas'}",
                 "subscription",
                 sid=sub.id,
             )
@@ -417,7 +435,7 @@ async def route(s, vault, chat_id, text="", callback=None, private=True, sender_
             for c in rows
         )
         return await finish(
-            f"<b>{escape(sub.code)}</b> · {escape(sub.period)}\nEstado: {sub.status}\nTurmas: {escape(', '.join(sub.numbers) or 'Todas')}\n\n{states}",
+            f"<b>{escape(sub.code)}</b> · {escape(sub.period)}\nEstado: {present(sub.status)}\nTurmas: {escape(', '.join(sub.numbers) or 'Todas')}\n\n{states}",
             buttons,
             "subscriptions",
         )

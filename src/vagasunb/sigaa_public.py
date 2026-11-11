@@ -26,7 +26,7 @@ class SourceError(Exception):
 
 
 def parse_results(html, unit, period):
-    soup = BeautifulSoup(html, "html.parser")
+    soup = html if isinstance(html, BeautifulSoup) else BeautifulSoup(html, "html.parser")
     errors = [normalize(x.get_text(" ", strip=True)) for x in soup.select("ul.erros li")]
     if errors:
         if all("nao foram encontrados resultados" in x for x in errors):
@@ -36,7 +36,9 @@ def parse_results(html, unit, period):
     if not table:
         raise SourceError("missing_table")
     headers = normalize(" ".join(th.get_text(" ", strip=True) for th in table.select("th")))
-    if not ("turma" in headers and "vagas" in headers and "ocupadas" in headers):
+    if not (
+        ("turma" in headers or "codigo" in headers) and "vagas" in headers and "ocupadas" in headers
+    ):
         raise SourceError("changed_header")
     code = name = None
     found = {}
@@ -58,8 +60,8 @@ def parse_results(html, unit, period):
                 raise SourceError("period_mismatch")
             offered = int(fields[5]) if fields[5].isdigit() else None
             occupied = int(fields[6]) if fields[6].isdigit() else None
-            if offered is not None and occupied is not None and occupied > offered:
-                raise SourceError("inconsistent_counts")
+            # Public SIGAA can report over-enrolment. Preserve the actual counts;
+            # the detector treats this row as UNKNOWN, never a negative/zero vacancy.
             data = dict(
                 source_id=row.get("data-id-turma"),
                 code=code,
@@ -84,114 +86,191 @@ def parse_results(html, unit, period):
 
 
 class PublicSource:
-    def __init__(self, transport=None):
-        self.transport = transport
-        self.serial = asyncio.Lock()
-        self.failures = 0
-        self.next_attempt = 0.0
-        self.last_request = 0.0
-        self.min_interval = 0 if transport else 1.0
-        self.requests = 0
+    complete = True
+    kind = "public"
 
-    async def collect(self, unit, period):
+    def __init__(self, transport=None):
+        self.serial = asyncio.Lock()
+        self.http = httpx.AsyncClient(
+            base_url=BASE, transport=transport, timeout=20, follow_redirects=False, trust_env=False
+        )
+        self.failures = self.requests = self.bytes = self.retries = self.limited = 0
+        self.sessions = 0
+        self.next_attempt = self.last_request = self.parse_ms = 0.0
+        self.min_interval = 0 if transport else 1.0
+        self.form = None
+        self.warm = False
+        self.metadata = None
+        self.metadata_at = 0.0
+
+    async def aclose(self):
+        await self.http.aclose()
+
+    async def request(self, method, path, **kwargs):
         if time.monotonic() < self.next_attempt:
             raise SourceError("circuit_open")
-        if not re.fullmatch(r"\d{4}\.\d", period):
-            raise SourceError("invalid_period")
-        async with self.serial:
-            # An isolated anonymous session for each scope prevents ViewState cross-talk.
-            async with httpx.AsyncClient(
-                base_url=BASE,
-                transport=self.transport,
-                timeout=20,
-                follow_redirects=False,
-                trust_env=False,
-            ) as http:
-                for attempt in range(3):
-                    try:
-                        result = await self._attempt(http, unit, period)
-                        self.failures = 0
-                        self.next_attempt = 0
-                        return result
-                    except SourceError as exc:
-                        if exc.code in {"rate_limit", "access_restricted"}:
-                            raise
-                        http.cookies.clear()
-                        if exc.code != "session_expired":
-                            break
-                    except (httpx.TimeoutException, httpx.NetworkError):
-                        if attempt < 2:
-                            await asyncio.sleep(2**attempt + random.random())
-                self.failures += 1
-                self.next_attempt = time.monotonic() + min(300, 2**self.failures)
-                raise SourceError("unavailable_or_changed")
-
-    async def request(self, http, method, path, **kwargs):
         await asyncio.sleep(max(0, self.min_interval - (time.monotonic() - self.last_request)))
         self.last_request = time.monotonic()
         self.requests += 1
-        response = await http.request(method, path, **kwargs)
+        response = await self.http.request(method, path, **kwargs)
+        self.bytes += response.num_bytes_downloaded + len(response.request.content)
         if response.status_code == 429:
+            from email.utils import parsedate_to_datetime
+            from datetime import datetime, timezone
+
             retry = response.headers.get("Retry-After", "60")
-            delay = min(86400, max(1, int(retry))) if retry.isdigit() else 300
-            self.next_attempt = time.monotonic() + delay
+            try:
+                delay = (
+                    int(retry)
+                    if retry.isdigit()
+                    else (parsedate_to_datetime(retry) - datetime.now(timezone.utc)).total_seconds()
+                )
+            except (ValueError, TypeError):
+                delay = 300
+            self.limited += 1
+            self.next_attempt = time.monotonic() + min(86400, max(1, delay))
             raise SourceError("rate_limit")
-        if response.status_code in {401, 403}:
+        if response.status_code in {401, 403} or any(
+            word in response.text.lower() for word in ("captcha", "access denied")
+        ):
             self.next_attempt = time.monotonic() + 3600
             raise SourceError("access_restricted")
         if response.is_redirect:
-            location = urljoin(BASE, response.headers.get("location", ""))
-            if location != BASE + HOME:
+            if urljoin(BASE, response.headers.get("location", "")) != BASE + HOME:
                 raise SourceError("unexpected_redirect")
             raise SourceError("session_expired")
         if response.status_code != 200:
             raise SourceError("http_unavailable")
         return response
 
-    async def _attempt(self, http, unit, period):
-        await self.request(http, "GET", HOME)
-        page = await self.request(http, "GET", PATH)
-        soup = BeautifulSoup(page.text, "html.parser")
+    def read_form(self, html):
+        soup = html if isinstance(html, BeautifulSoup) else BeautifulSoup(html, "html.parser")
         form = soup.find("form", id="formTurma")
         if not form:
             raise SourceError("changed_form")
-        names = {
+        payload = {}
+        for item in form.select("input[name],select[name]"):
+            if item.name == "select":
+                selected = item.select_one("option[selected]") or item.select_one("option")
+                payload[item["name"]] = selected.get("value", "") if selected else ""
+            elif item.get("type") != "submit":
+                payload[item["name"]] = item.get("value", "")
+        required = {
             "formTurma:inputNivel",
             "formTurma:inputDepto",
             "formTurma:inputAno",
             "formTurma:inputPeriodo",
             "javax.faces.ViewState",
         }
-        payload = {}
-        for item in form.select("input[name], select[name]"):
-            if item.name == "select":
-                chosen = item.select_one("option[selected]") or item.select_one("option")
-                payload[item["name"]] = chosen.get("value", "") if chosen else ""
-            elif item.get("type") != "submit":
-                payload[item["name"]] = item.get("value", "")
         button = form.find("input", attrs={"type": "submit", "value": "Buscar"})
+        action = urljoin(BASE, form.get("action", ""))
         if (
-            not names.issubset(payload)
+            not required.issubset(payload)
             or not payload["javax.faces.ViewState"]
             or not button
             or not button.get("name")
+            or action != BASE + PATH
         ):
             raise SourceError("changed_form")
-        unit_select = form.find("select", attrs={"name": "formTurma:inputDepto"})
-        if not unit_select.find("option", attrs={"value": unit}):
-            raise SourceError("unknown_unit")
-        year, term = period.split(".")
-        payload.update(
-            {
-                "formTurma:inputNivel": "G",
-                "formTurma:inputDepto": unit,
-                "formTurma:inputAno": year,
-                "formTurma:inputPeriodo": term,
-                button["name"]: "Buscar",
-            }
-        )
-        action = urljoin(BASE, form.get("action", ""))
-        if action != BASE + PATH:
-            raise SourceError("unsafe_action")
-        response = await self.request(http, "POST", action, data=payload)
-        return parse_results(response.text, unit, period)
+
+        def choices(field):
+            select = form.find("select", attrs={"name": field})
+            if not select:
+                raise SourceError("changed_form")
+            return [
+                {"id": str(o.get("value", "")), "name": o.get_text(" ", strip=True)}
+                for o in select.select("option")
+            ]
+
+        units = [
+            v for v in choices("formTurma:inputDepto") if v["id"].isdigit() and int(v["id"]) > 0
+        ]
+        levels = [
+            v
+            for v in choices("formTurma:inputNivel")
+            if v["id"] and "selecione" not in normalize(v["name"])
+        ]
+        everyone = [v for v in choices("formTurma:inputNivel") if "todos" in normalize(v["name"])]
+        if everyone:
+            levels = everyone[:1]
+        if not units or not levels:
+            raise SourceError("empty_discovery")
+        metadata = {
+            "units": units,
+            "levels": levels,
+            "period": payload["formTurma:inputAno"] + "." + payload["formTurma:inputPeriodo"],
+        }
+        return (action, payload, str(button["name"])), metadata
+
+    async def ensure_form(self):
+        if not self.warm:
+            await self.request("GET", HOME)
+            self.sessions += 1
+            self.warm = True
+        if self.form is None:
+            response = await self.request("GET", PATH)
+            self.form, self.metadata = self.read_form(response.text)
+            self.metadata_at = time.monotonic()
+
+    async def discover(self):
+        async with self.serial:
+            if not self.metadata or time.monotonic() - self.metadata_at > 21600:
+                self.form = None
+                await self.ensure_form()
+            return self.metadata
+
+    async def collect(self, unit, period, level="G"):
+        if not re.fullmatch(r"\d{4}\.\d", period):
+            raise SourceError("invalid_period")
+        async with self.serial:
+            for attempt in range(3):
+                try:
+                    await self.ensure_form()
+                    if unit not in {u["id"] for u in self.metadata["units"]} or level not in {
+                        v["id"] for v in self.metadata["levels"]
+                    }:
+                        raise SourceError("unknown_scope")
+                    action, defaults, button = self.form
+                    payload = dict(defaults)
+                    year, term = period.split(".")
+                    payload.update(
+                        {
+                            "formTurma:inputNivel": level,
+                            "formTurma:inputDepto": unit,
+                            "formTurma:inputAno": year,
+                            "formTurma:inputPeriodo": term,
+                            button: "Buscar",
+                        }
+                    )
+                    response = await self.request("POST", action, data=payload)
+                    start = time.perf_counter()
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    rows = parse_results(soup, unit, period)
+                    unit_name = next(u["name"] for u in self.metadata["units"] if u["id"] == unit)
+                    for row in rows:
+                        row["provenance"] = "SIGAA público · " + unit_name
+                    try:
+                        self.form, _ = self.read_form(soup)
+                    except SourceError:
+                        self.form = None  # No proven reusable form: reopen it, keep warm session.
+                    self.parse_ms += (time.perf_counter() - start) * 1000
+                    self.failures = 0
+                    return rows
+                except SourceError as exc:
+                    if exc.code not in {"session_expired", "http_unavailable"}:
+                        raise
+                    self.warm = False
+                    self.form = None
+                    self.http.cookies.clear()
+                    if attempt == 2:
+                        self.failures += 1
+                        self.next_attempt = time.monotonic() + min(300, 2**self.failures)
+                        raise
+                except (httpx.TimeoutException, httpx.NetworkError):
+                    self.form = None
+                    if attempt == 2:
+                        self.failures += 1
+                        self.next_attempt = time.monotonic() + min(300, 2**self.failures)
+                        raise SourceError("network_unavailable") from None
+                self.retries += 1
+                await asyncio.sleep(0 if self.min_interval == 0 else 2**attempt + random.random())

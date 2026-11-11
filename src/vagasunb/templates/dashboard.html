@@ -1,13 +1,294 @@
-<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Painel · VagasUnB (Extraordinária)</title><link rel="stylesheet" href="/assets/style.css"><body>
-<aside><a class="brand" href="/">VagasUnB <small>(Extraordinária)</small></a><span class="pill">{{ mode|upper }}</span><nav><a href="#overview">◫ Visão geral</a><a href="#usage">◎ Uso agregado</a><a href="#catalog">▦ Catálogo</a><a href="#collector">↻ Coletor</a><a href="#delivery">↗ Detecção e envio</a><a href="#resources">◷ Banco e recursos</a><a href="#records">≡ Registros</a><a href="#settings">⚙ Configuração</a>{% if mode == 'demo' %}<a class="active" href="/demo">▷ Abrir simulador</a>{% endif %}</nav><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Sair</button></form><p class="muted">Independente da UnB.<br>Sem matrícula automática.</p></aside>
-<main class="dashboard"><header id="overview"><div><span class="eyebrow">CENTRAL DE OPERAÇÕES</span><h1>Visão geral</h1><p>O que está acontecendo, com dados da sua instância.</p></div><span class="pill">{{ 'Telegram simulado · sem rede externa' if mode == 'demo' else 'Telegram desabilitado' }}</span></header>
-<div class="notice">{{ 'DEMONSTRAÇÃO · Catálogo e destinatários inteiramente sintéticos.' if mode == 'demo' else 'CATÁLOGO PÚBLICO · Dados sujeitos a atraso.' }} Período <b>{{ ops.period }}</b>. Uptime do painel: {{ uptime }} s.</div>
-<section class="cards">{% for label, value in counts.items() %}<article><span>{{ label|capitalize }}</span><strong>{{ value }}</strong></article>{% endfor %}</section>
-<section id="usage"><h2>Uso agregado</h2><div class="grid"><article><h3>Inscrições por estado</h3>{% for state, value in sub_status.items() %}<p>{{ state }} <b>{{ value }}</b></p>{% else %}<p class="muted">Nenhum monitoramento cadastrado.</p>{% endfor %}<p class="muted">Destinatários registrados não equivalem a pessoas únicas. Não exibimos inscrições individuais.</p></article><article><h3>Saúde do worker</h3>{% if heartbeat %}<pre>{{ heartbeat|tojson(indent=2) }}</pre><p class="muted">Confira a data do heartbeat; mais de 180 s indica worker sem atualização.</p>{% else %}<p class="warning">Worker ainda não reportou saúde.</p>{% endif %}<p>Coleta: {{ 'pausada' if ops.collect_paused else 'habilitada' }} · Despacho: {{ 'pausado' if ops.dispatch_paused else 'habilitado' }}</p></article></div></section>
-<section><h2>Série agregada diária</h2><p class="muted">Últimos 30 dias disponíveis; retenção de 90 dias. Um snapshot por dia, sem histórico individual.</p><div class="table-wrap"><table><thead><tr><th>Dia</th><th>Destinatários</th><th>Inscrições</th><th>Banco (bytes)</th></tr></thead><tbody>{% for day, counters in series %}<tr><td>{{ day }}</td><td>{{ counters.recipients }}</td><td>{{ counters.subscriptions }}</td><td>{{ counters.database_bytes }}</td></tr>{% else %}<tr><td colspan="4">A primeira limpeza gera o snapshot diário.</td></tr>{% endfor %}</tbody></table></div></section><section id="catalog"><div class="section-head"><h2>Catálogo local</h2><span class="muted">{{ total }} resultados · {{ ops.period }}</span></div><form class="inline" method="get"><input name="q" placeholder="Buscar código, nome ou turma" value="{{ q }}" maxlength="120"><button>Buscar</button></form>{% if approximate %}<p class="notice">Sugestões aproximadas.</p>{% endif %}<div class="table-wrap"><table><thead><tr><th>Disciplina / turma</th><th>Campus / unidade</th><th>Ofertadas</th><th>Ocupadas</th><th>Disponíveis</th><th>Última observação válida</th></tr></thead><tbody>{% for c in catalog %}<tr><td><b>{{ c.code }} · {{ c.number }}</b><br>{{ c.name }}</td><td>{{ c.campus or 'Campus não identificado' }}<br><small>{{ c.units|join(', ') }} · {{ c.provenance }}</small></td><td>{{ c.offered if c.offered is not none else 'Não informado' }}</td><td>{{ c.occupied if c.occupied is not none else 'Não informado' }}</td><td><span class="pill">{{ c.available if c.available is not none else 'UNKNOWN' }}</span><br>{{ 'STALE' if not c.observed or (now-c.observed).total_seconds() > ops.stale else c.state }}</td><td>{{ c.observed or 'Não informado' }}{% if c.missing %}<br>Ausente em {{ c.missing }} coleta(s){% endif %}</td></tr>{% else %}<tr><td colspan="6">Catálogo vazio para estes filtros. Configure período e escopos; nenhuma coleta é disparada pela busca.</td></tr>{% endfor %}</tbody></table></div><p class="pagination">{% if page > 0 %}<a href="/?page={{ page-1 }}#catalog">← Anterior</a>{% endif %} Página {{ page+1 }} {% if (page+1)*6 < total and not q %}<a href="/?page={{ page+1 }}#catalog">Próxima →</a>{% endif %}</p></section>
-<section id="collector"><h2>Coletor por escopo</h2><div class="cards"><article><span>Intervalo configurado</span><strong>{{ ops.interval }} <small>s</small></strong></article><article><span>Média / últimas 100 coletas</span><strong>{{ mean_ms if mean_ms is not none else '—' }} <small>ms</small></strong></article><article><span>p95 / últimas 100 coletas</span><strong>{{ p95_ms if p95_ms is not none else '—' }} <small>ms</small></strong></article><article><span>Concorrência de coleta</span><strong>1</strong></article></div><div class="toolbar">{% for action, label in [('collect_paused', 'Pausar / retomar coleta'), ('dispatch_paused', 'Pausar / retomar despacho'), ('cleanup', 'Limpar dados vencidos'), ('retry', 'Reavaliar retries seguros')] %}<form method="post" action="/operations"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="{{ action }}"><button class="secondary">{{ label }}</button></form>{% endfor %}</div><form class="inline" method="post" action="/operations"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="collect"><select name="scope">{% for scope in ops.scopes %}<option>{{ scope }}</option>{% endfor %}</select><button>Solicitar uma coleta</button></form><div class="table-wrap"><table><thead><tr><th>Escopo</th><th>Início</th><th>Duração</th><th>Cobertura</th><th>Resultado</th></tr></thead><tbody>{% for r in runs %}<tr><td>{{ r.scope }}</td><td>{{ r.started }}</td><td>{{ r.duration_ms }} ms</td><td>{{ r.count }} turmas</td><td>{{ 'Válida' if r.valid else r.error }}</td></tr>{% else %}<tr><td colspan="5">Nenhuma coleta executada.</td></tr>{% endfor %}</tbody></table></div><p class="muted">Falhas preservam os últimos dados. Bloqueios PostgreSQL impedem sobreposição por escopo. Pedidos não acumulam ticks.</p></section>
-<section id="delivery"><h2>Detecção e envio</h2><div class="grid"><article><h3>Política de alertas</h3><p>Debounce: {{ ops.debounce }} s + nova observação válida.<br>Cooldown: {{ ops.cooldown }} s por destinatário/turma.<br>Agrupamento: {{ ops.group_delay }} s.<br>Frescura / TTL: {{ ops.stale }} s.</p><p class="muted">Baseline não alerta. 1 → 2 vagas não cria novo ciclo. Resultado incerto não recebe retry automático.</p></article><article><h3>Outbox</h3>{% for state, n in out_status.items() %}<p>{{ state }} <b>{{ n }}</b></p>{% else %}<p class="muted">Sem alertas na fila.</p>{% endfor %}<p>Idade do pendente mais antigo: {{ oldest if oldest is not none else '—' }} s.</p></article></div></section>
-<section id="resources"><h2>Banco e recursos</h2><div class="cards"><article><span>PostgreSQL / banco atual</span><strong>{{ (database_size/1048576)|round(2) }} <small>MiB</small></strong></article><article><span>Memória / processo admin</span><strong>{{ (memory/1048576)|round(1) }} <small>MiB</small></strong></article><article><span>CPU acumulada / processo admin</span><strong>{{ cpu }} <small>s</small></strong></article><article><span>Livre / filesystem da configuração</span><strong>{{ (disk_free/1073741824)|round(1) }} <small>GiB</small></strong></article></div><article>{% for t in tables %}<p>{{ t.relname }}: {{ t.bytes }} bytes (inclui índices)</p>{% endfor %}<p class="muted">Escopo local ao processo/container. Disco da VPS e limites externos: indisponíveis. Sem integração Oracle. Esquema: migração 0001. Backups não são agendados.</p></article></section>
-<section id="records"><div class="section-head"><h2>Registros sanitizados</h2><a href="/events.csv">Exportar até 500 eventos</a></div><div class="table-wrap"><table><thead><tr><th>Data</th><th>Categoria</th><th>Código</th><th>Agregados</th></tr></thead><tbody>{% for e in events %}<tr><td>{{ e.created }}</td><td>{{ e.category }}</td><td>{{ e.code }}</td><td>{{ e.values }}</td></tr>{% else %}<tr><td colspan="4">Nenhum evento registrado.</td></tr>{% endfor %}</tbody></table></div></section>
-<section id="settings"><h2>Configuração operacional</h2><form class="config" method="post" action="/operations"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="config"><label>Período<input name="period" value="{{ ops.period }}" required></label><label>Fim da janela (ISO com fuso)<input name="window_end" value="{{ ops.window_end }}" required></label>{% for key, label in [('interval','Intervalo de coleta (s)'),('debounce','Debounce (s)'),('cooldown','Cooldown (s)'),('group_delay','Agrupamento (s)'),('stale','Frescura (s)'),('outbox_days','Retenção de envios (dias)'),('events_days','Retenção de eventos (dias)'),('recipient_days','Inatividade sem inscrições (dias)')] %}<label>{{ label }}<input type="number" name="{{ key }}" value="{{ ops[key] }}" min="{{ 0 if key in ['debounce','cooldown','group_delay'] else 1 }}" required></label>{% endfor %}<button>Salvar configuração</button></form><p class="muted">Chaves e token não são exibidos. Containers: use scripts start/stop/restart; este painel controla apenas tarefas internas. Em restauração, concilie exclusões antes de retirar a quarentena pela CLI.</p></section>
-<footer>VagasUnB (Extraordinária) · Gratuito, independente e sem garantia de vaga.</footer></main></body></html>
+{% from 'help.html' import help %}
+{% macro hidden() -%}<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="action" value="config">
+<input type="hidden" name="config_version" value="{{ config_version }}">{%- endmacro %}
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel · VagasUnB (Extraordinária)</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script id="presentation" type="application/json">{{ labels|tojson }}</script>
+<script src="/assets/help.js" defer>
+</script>
+<script src="/assets/dashboard.js" defer>
+</script>
+<body>
+<aside>
+<a class="brand" href="/">VagasUnB <small>(Extraordinária)</small>
+</a>
+<nav>
+<a href="#overview">◫ Visão geral</a>
+<a href="#catalog">▦ Catálogo e atualizações</a>
+<a href="#delivery">↗ Monitoramentos e avisos</a>
+<a href="#operation">◷ Funcionamento e horários</a>
+<a href="#settings">⚙ Configurações</a>
+<a href="#records">≡ Registros e diagnóstico</a>{% if mode == 'demo' %}<a href="/demo">▷ Abrir simulador</a>{% endif %}</nav>
+<form method="post" action="/logout">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button class="secondary">Sair</button>{{ help('Encerra esta sessão administrativa. Os serviços continuam funcionando.') }}</form>
+<p class="muted">Independente da UnB.<br>Sem matrícula automática.</p>
+</aside>
+<main class="dashboard">
+<header id="overview">
+<div>
+<span class="eyebrow">CENTRAL DE OPERAÇÕES</span>
+<h1>Visão geral</h1>
+<p>Catálogo compartilhado e monitoramento de vagas.</p>
+</div>
+<div><span class="pill">Telegram ainda não conectado — teste por simulação</span>{{ help('Esta fase não conecta o Telegram real. O simulador usa destinatários fictícios e não envia mensagens externas.') }}</div></header>
+<div class="notice" id="situation">Consultando o estado local…</div>
+<p>Catálogo: <b>{{ catalog_source|label }}</b> · Período <b>{{ ops.period }}</b> · Horário de Brasília ({{ ops.timezone }}). {{ help('O catálogo público contém dados oficiais sujeitos a atraso. Demonstração usa dados fictícios. Buscar consulta apenas o banco local.') }}</p>
+<section class="cards">{% for name,value in counts.items() %}<article>
+<span>{{ name|capitalize }} {{ help(count_help[name]) }}</span>
+<strong>{{ value }}</strong>
+</article>{% endfor %}</section>
+<section id="live">
+<h2>Operação ao vivo {{ help('A tela consulta somente o banco local no intervalo configurado. A aba oculta pausa a atualização, que preserva formulários e ajuda em leitura.') }}</h2>
+<div class="cards">
+{% for id,name,tip in [('coverage','Consultas válidas / previstas','Combinações de unidade e nível com resposta válida, incluindo respostas vazias. Não é porcentagem de todas as turmas existentes.'),('interval','Intervalo escolhido / observado','Frequência desejada entre inícios e intervalo efetivamente medido. Se o catálogo demora mais, o sistema espera sem sobrepor ciclos.'),('duration','Duração da atualização','Tempo total do ciclo. Bytes medem dados HTTP processados, sem toda a sobrecarga da conexão. Leitura e publicação usam milissegundos.'),('pending','Avisos aguardando envio','Soma de pendentes e novas tentativas seguras. Avisos antigos são cancelados antes do envio; resultado não confirmado não é reenviado automaticamente.')] %}<article>
+<span>{{ name }} {{ help(tip) }}</span>
+<strong id="live-{{ id }}">Aguardando medição</strong>
+<p id="{{ {'coverage':'live-status','interval':'live-next','duration':'live-network','pending':'live-worker'}[id] }}">
+</p>
+</article>{% endfor %}</div>
+<p><span id="live-complete"></span>{{ help('Último ciclo em que todas as consultas previstas tiveram resposta válida. Continua acessível durante outro ciclo ou após uma falha; o período é informado separadamente.') }}</p>
+<p><span id="live-levels"></span>{{ help('Unidades distintas e níveis descobertos no período deste ciclo. A data de publicação pode pertencer a um ciclo parcial; não significa catálogo inteiro atualizado.') }}</p>
+<p><span id="live-distribution"></span>{{ help('Concorrência é o número de envios em andamento, limitada também pelo total por segundo e por conversa. A diferença entre a primeira e última entrega mede a dispersão do lote, sem promessa de envio simultâneo.') }}</p>
+<details>
+<summary>Detalhes técnicos agregados (opcional) {{ help('Dados sanitizados para manutenção, sem identificadores de estudantes ou segredos. A explicação principal está nos cartões acima.') }}</summary>
+<pre id="live-details">Aguardando medições.</pre>
+</details>
+</section>
+<section id="usage">
+<h2>Monitoramentos {{ help('Cada destinatário pode acompanhar até dez disciplinas. Todos compartilham o mesmo catálogo; inscrições não criam consultas individuais ao SIGAA.') }}</h2>
+<div class="grid">
+<article>
+<h3>Inscrições por situação</h3>{% for status,n in sub_status.items() %}<p>{{ status|label }}: <b>{{ n }}</b>
+</p>{% else %}<p>Nenhum monitoramento cadastrado.</p>{% endfor %}<p>{{ all_count }} disciplinas inteiras · {{ selected_count }} seleções de turmas.</p>
+</article>
+<article>
+<h3>Serviço em segundo plano {{ help('O último sinal mostra quando o processo respondeu. Um sinal recente não garante que o SIGAA esteja disponível; veja também o resultado da atualização.') }}</h3>{% if heartbeat %}<p>Último sinal: {{ heartbeat.at|brdate(ops.timezone) }}</p>
+<p>Atualizações: {{ heartbeat.collect|label }} · Avisos: {{ heartbeat.dispatch|label }}</p>{% else %}<p>Aguardando o primeiro sinal. Inicie pelos scripts locais.</p>{% endif %}</article>
+</div>
+</section>
+<section>
+<h2>Evolução diária {{ help('Uma contagem agregada por dia, conservada por até noventa dias. A limpeza periódica produz o registro, sem histórico de conversas ou buscas.') }}</h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>Dia</th>
+<th>Destinatários</th>
+<th>Monitoramentos</th>
+<th>Banco (bytes)</th>
+</tr>
+</thead>
+<tbody>{% for day,counters in series %}<tr>
+<td>{{ day.split('-')|reverse|join('/') }}</td>
+<td>{{ counters.recipients }}</td>
+<td>{{ counters.subscriptions }}</td>
+<td>{{ counters.database_bytes }}</td>
+</tr>{% else %}<tr>
+<td colspan="4">Aguardando a primeira contagem diária.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section id="catalog">
+<div class="section-head">
+<h2>Catálogo local {{ help('Mostra as turmas do período escolhido. Coleta parcial preserva dados anteriores. Informação antiga ou disponibilidade não confirmada não significa zero vagas.') }}</h2>
+<span>{{ total }} resultados · {{ ops.period }}</span>
+</div>
+<form class="inline" method="get">
+<input name="q" aria-label="Buscar no catálogo" placeholder="Código, nome ou turma" value="{{ q }}" maxlength="120">
+<button>Buscar</button>{{ help('Busca paginada no banco local. Não consulta o SIGAA nem guarda o texto pesquisado.') }}</form>{% if approximate %}<p class="notice">Sugestões aproximadas.</p>{% endif %}
+<div class="table-wrap">
+<table>
+<thead>
+<tr>{% for name,tip in [('Disciplina / turma','Código oficial e número da turma identificam a oferta no período acadêmico.'),('Campus / unidade','Uma turma pode aparecer em várias unidades. Campus ausente não é inferido sem evidência.'),('Ofertadas','Total informado pela fonte na última leitura válida.'),('Ocupadas','Vagas ocupadas informadas pela fonte. Inconsistências tornam a disponibilidade não confirmada.'),('Disponíveis','Diferença entre ofertadas e ocupadas quando válidas. Uma abertura precisa de outra leitura para gerar aviso.'),('Última leitura','Horário da observação válida no fuso indicado. Ausência em uma coleta não apaga a turma.')] %}<th>{{ name }} {{ help(tip) }}</th>{% endfor %}</tr>
+</thead>
+<tbody>{% for c in catalog %}<tr>
+<td>
+<b>{{ c.code }} · {{ c.number }}</b>
+<br>{{ c.name }}</td>
+<td>{{ c.campus or 'Campus não identificado' }}<br>
+<small>{{ c.units|join(', ') }} · {{ c.provenance }}</small>
+</td>
+<td>{{ c.offered if c.offered is not none else 'Não informado' }}</td>
+<td>{{ c.occupied if c.occupied is not none else 'Não informado' }}</td>
+<td>
+<span class="pill">{{ c.available if c.available is not none else 'Não confirmado' }}</span>
+<br>{{ ('STALE' if not c.observed or (now-c.observed).total_seconds() > ops.stale else c.state)|label }}</td>
+<td>{{ c.observed|brdate(ops.timezone) }}{% if c.missing %}<br>Ausente em {{ c.missing }} leitura(s){% endif %}</td>
+</tr>{% else %}<tr>
+<td colspan="6">Nenhuma turma para estes filtros. Confira o período e a fonte nas configurações.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+<p class="pagination">{% if page > 0 %}<a href="/?page={{ page-1 }}&amp;q={{ q|urlencode }}#catalog">← Anterior</a>{% endif %}Página {{ page+1 }}{% if (page+1)*6 < total %}<a href="/?page={{ page+1 }}&amp;q={{ q|urlencode }}#catalog">Próxima →</a>{% endif %}</p>
+<form class="inline" method="post" action="/operations">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="action" value="collect">
+<button>Atualizar catálogo agora</button>{{ help('Solicita um ciclo completo compartilhado. Respeita ciclo ativo, pausa manual, agenda e pausas da fonte. Não apaga o catálogo anterior.') }}</form>
+<details id="collector">
+<summary>Consultas recentes por unidade e nível {{ help('Cada linha é uma combinação consultada. Média e tempo em 95 de cada 100 consultas usam as últimas cem leituras. Falhas preservam os dados anteriores.') }}</summary>
+<p>Média: {{ mean_ms if mean_ms is not none else 'Ainda não medido' }} ms · Tempo em 95 de 100: {{ p95_ms if p95_ms is not none else 'Ainda não medido' }} ms · Uma consulta à fonte por vez.</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>Unidade e nível</th>
+<th>Início · Brasília</th>
+<th>Duração</th>
+<th>Turmas</th>
+<th>Resultado</th>
+</tr>
+</thead>
+<tbody>{% for r in runs %}<tr>
+<td>{{ r.scope }}</td>
+<td>{{ r.started|brdate(ops.timezone) }}</td>
+<td>{{ (r.duration_ms/1000)|duration }}</td>
+<td>{{ r.count }}</td>
+<td>{{ 'Leitura válida' if r.valid else r.error|label }}</td>
+</tr>{% else %}<tr>
+<td colspan="5">Nenhuma consulta registrada.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</details>
+</section>
+<section id="delivery">
+<h2>Central de avisos {{ help('A primeira leitura não alerta. Uma vaga confirmada gera um evento compartilhado e avisos por inscrição. Cem inscritos não multiplicam consultas à fonte.') }}</h2>
+<div class="grid">
+<article>
+<h3>Política atual</h3>
+<p>Confirmação: {{ ops.debounce|duration }} + nova leitura válida. {{ help('Espera outra leitura antes de avisar. Reduz oscilações; aumentar o tempo também atrasa o aviso.') }}</p>
+<p>Intervalo entre novos avisos: {{ ops.cooldown|duration }}. {{ help('Começa no envio efetivo e evita repetições da mesma turma por destinatário. Não substitui o limite por conversa.') }}</p>
+<p>Agrupamento: {{ ops.group_delay|duration }} · Validade: {{ ops.stale|duration }}. {{ help('Agrupamento reúne turmas da mesma disciplina. Avisos e dados mais antigos que a validade não são enviados; aumentar o prazo aceita informação menos recente.') }}</p>
+</article>
+<article>
+<h3>Situação dos avisos</h3>{% for status,n in out_status.items() %}<p>{{ status|label }}: <b>{{ n }}</b>
+</p>{% else %}<p>Nenhum aviso aguardando envio.</p>{% endfor %}<p>Espera do mais antigo: {{ oldest|duration }}. {{ help('Idade do aviso pendente mais antigo. Resultado não confirmado pode ter sido recebido; reenviar automaticamente poderia duplicar a mensagem.') }}</p>
+</article>
+</div>
+</section>
+<section id="operation">
+<h2>Funcionamento e horários {{ help('Pausa atividades internas e mantém o painel acessível. Para iniciar ou parar os processos, use os scripts locais.') }}</h2>
+<div class="grid">{% for task,name,option in [('register','Novos monitoramentos','registrations_open'),('collect','Atualizações do catálogo','collect_paused'),('dispatch','Envio de avisos','dispatch_paused')] %}<article>
+<h3>{{ name }} {{ help('O controle manual prevalece sobre a agenda. Fechar inscrições mantém consulta, cancelamento e exclusão disponíveis. Pausas preservam dados; avisos continuam sujeitos à validade.') }}</h3>
+<p>Solicitado: {{ 'ligado' if gates[task].requested else 'pausado' }} · Efetivo: {{ gates[task].reason|label }}</p>
+<p data-gate="{{ task }}">
+</p>
+<form method="post" action="/operations">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="action" value="{{ option }}">
+<input type="hidden" name="value" value="{{ 'false' if ops[option] else 'true' }}">
+<button class="secondary">{{ ('Fechar novos monitoramentos' if ops[option] else 'Abrir novos monitoramentos') if task == 'register' else (('Retomar atualizações' if ops[option] else 'Pausar atualizações') if task == 'collect' else ('Retomar avisos' if ops[option] else 'Pausar avisos')) }}</button>
+</form>
+<details>
+<summary>Programar {{ name|lower }} {{ help('Datas opcionais limitam a operação. Dias vazios significam todos. Faixa vazia significa dia inteiro. Uma faixa 22:00–02:00 pertence ao dia em que abre; pausa manual continua prevalecendo.') }}</summary>
+<form class="config schedule" method="post" action="/operations">{{ hidden() }}{% set key='schedule_'+task %}{% set rule=ops[key] %}<label>Funcionamento {{ help('Manual ignora a agenda. Por horário aplica os limites abaixo, respeitando a pausa manual de segurança.') }}<select name="{{ key }}_enabled">
+<option value="false" {{ 'selected' if not rule.enabled }}>Manual</option>
+<option value="true" {{ 'selected' if rule.enabled }}>Por horário</option>
+</select>
+</label>
+{% for bound,name,tip in [('start','Início opcional · Brasília','Antes desta data, a atividade aguarda. Vazio não impõe data inicial.'),('end','Fim opcional · Brasília','A atividade para neste instante. Deve ser posterior ao início; vazio não impõe data final.')] %}<label>{{ name }} {{ help(tip) }}<input type="datetime-local" name="{{ key }}_{{ bound }}" value="{{ rule[bound]|default('')|inputdate(ops.timezone) }}">
+</label>{% endfor %}<fieldset>
+<legend>Dias de abertura {{ help('Sem seleção, vale todos os dias. Em faixa que atravessa meia-noite, selecione o dia em que ela começa.') }}</legend>{% for day in ['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'] %}<label class="check">
+<input type="checkbox" name="{{ key }}_days" value="{{ loop.index0 }}" {{ 'checked' if loop.index0 in rule.days|default([]) }}>{{ day }}</label>{% endfor %}</fieldset>
+<label>Abre às · Brasília {{ help('Preencha abertura e fechamento juntos ou deixe ambos vazios para o dia inteiro. Horários iguais não são permitidos.') }}<input type="time" name="{{ key }}_from" value="{{ rule['from']|default('') }}">
+</label>
+<label>Fecha às · Brasília {{ help('Se anterior à abertura, fecha no dia seguinte. Exemplo: segunda 22:00 até terça 02:00.') }}<input type="time" name="{{ key }}_to" value="{{ rule.to|default('') }}">
+</label>
+<button>Salvar agenda</button>{{ help('Salva os horários desta atividade. A pausa manual continua prevalecendo e não é necessário reiniciar.') }}</form>
+</details>
+</article>{% endfor %}</div>
+</section>
+<section id="settings">
+<h2>Configurações {{ help('Cada formulário salva seu grupo. Novas decisões usam os valores salvos; uma consulta já iniciada termina antes da troca de fonte ou período. Não exige reiniciar.') }}</h2>
+<p id="save-feedback" role="status">{{ 'Configuração salva.' if request.query_params.get('saved') else '' }}</p>
+<h3>Opções principais</h3>
+<form class="config" method="post" action="/operations">{{ hidden() }}<label>Fonte do catálogo {{ help('Demonstração usa dados fictícios. Público consulta unidades e níveis oficiais sem login. Trocar preserva inscrições e não conecta o Telegram.') }}<select name="source">
+<option value="demo" {{ 'selected' if ops.source == 'demo' }}>Demonstração</option>
+<option value="public" {{ 'selected' if ops.source == 'public' }}>Catálogo público SIGAA</option>
+</select>
+</label>
+<label>Período acadêmico {{ help('Use DEMO.1 para demonstração ou período público no formato 2026.2. Outros períodos e seus monitoramentos são preservados.') }}<input name="period" value="{{ ops.period }}" maxlength="20" required>
+</label>
+<label>Atualizações automáticas {{ help('Automáticas seguem intervalo e agenda. Somente manuais aguardam o botão de atualização. Pausa manual bloqueia ambas.') }}<select name="collection_auto">
+<option value="true" {{ 'selected' if ops.collection_auto }}>Automáticas</option>
+<option value="false" {{ 'selected' if not ops.collection_auto }}>Somente manuais</option>
+</select>
+</label>
+<label>Intervalo escolhido (segundos) {{ help('Pode ser cinco segundos, mas o catálogo real pode levar muitos minutos. Não cria ciclos sobrepostos.') }}<input name="interval" type="number" min="1" max="604800" value="{{ ops.interval }}" required>
+</label>
+<button>Salvar configuração</button>{{ help('Salva fonte, período, modo de atualização e intervalo juntos. Um ciclo ativo termina a consulta em curso antes da troca.') }}</form>
+<p>Cobertura: catálogo completo por unidades e níveis descobertos. {{ help('A descoberta define a cobertura. O antigo campo de unidades permanece preservado, mas não limita silenciosamente o catálogo global. Respostas vazias também contam como consultas válidas.') }}</p>
+<form class="config" method="post" action="/operations">{{ hidden() }}<label>Mensagem ao fechar novos monitoramentos {{ help('Mostrada quando alguém tenta criar um monitoramento fora do funcionamento permitido. Consulta e exclusão continuam disponíveis. Até 240 caracteres.') }}<input name="closed_message" maxlength="240" value="{{ ops.closed_message }}" required>
+</label>
+<label>Fim da janela de monitoramento · Brasília {{ help('Limite geral para novos monitoramentos e avisos, independente das agendas. Não apaga inscrições ao terminar.') }}<input type="datetime-local" name="window_end_local" value="{{ ops.window_end|inputdate(ops.timezone) }}" required>
+</label>
+<button>Salvar funcionamento</button>{{ help('Salva a mensagem de fechamento e o limite geral de monitoramento. Não apaga inscrições ou catálogo.') }}</form>
+<details>
+<summary>Opções avançadas {{ help('Ajustes de confirmação, validade, velocidade e conservação. Não habilitam envio real. Altere os campos necessários e salve este grupo.') }}</summary>
+<form class="config" method="post" action="/operations">{{ hidden() }}
+{% for key,name,tip,maximum in [('screen_interval','Atualização da tela (s)','Consulta somente o banco local. De três a sessenta segundos; aumentar reduz consultas e não altera o intervalo do SIGAA.',60),('debounce','Tempo para confirmar uma vaga (s)','Espera uma segunda leitura válida. Maior tempo reduz oscilações e atrasa o aviso.',86400),('cooldown','Intervalo entre novos avisos (s)','Tempo após envio da mesma turma ao mesmo destinatário. Aumentar reduz repetições.',86400),('group_delay','Tempo de agrupamento (s)','Reúne turmas da mesma disciplina. Aumentar pode reduzir mensagens e aumentar a espera.',86400),('stale','Prazo máximo de dados e avisos (s)','Dados e avisos antigos não são enviados. Prazo maior aceita informação menos recente.',604800),('send_rate','Limite total de mensagens por segundo','Compartilhado por alertas e respostas. Entre 1 e 29, com pelo menos um segundo por conversa.',29),('send_concurrency','Envios simultâneos','Quantidade de envios em andamento. Aumentar não elimina o limite total. Recomendado: seis.',12),('outbox_days','Conservar avisos finalizados (dias)','Limpeza remove avisos finalizados vencidos, preservando monitoramentos ativos.',604800),('events_days','Conservar registros de operação (dias)','Menor prazo reduz espaço e histórico de diagnóstico. Eventos não contêm conversas.',604800),('recipient_days','Remover inativos sem inscrições (dias)','Remove somente cadastros inativos sem inscrições após este prazo. Preserva monitoramentos ativos.',604800)] %}<label>{{ name }} {{ help(tip) }}<input type="number" name="{{ key }}" value="{{ ops[key] }}" min="{{ 3 if key == 'screen_interval' else (0 if key in ['debounce','cooldown','group_delay'] else 1) }}" max="{{ maximum }}" required>
+</label>{% endfor %}<button>Salvar opções avançadas</button>{{ help('Salva os limites de confirmação, envio e conservação deste grupo. Não conecta o Telegram.') }}</form>
+</details>
+</section>
+<section id="resources">
+<h2>Banco e recursos {{ help('Medições locais do painel e PostgreSQL. Não incluem limites da futura VPS. Não há Oracle ou backup agendado.') }}</h2>
+<div class="cards">{% for name,value,unit,tip in [('Banco atual',(database_size/1048576)|round(2),'MiB','Inclui tabelas e índices. Um MiB corresponde a 1.048.576 bytes.'),('Memória do painel',(memory/1048576)|round(1),'MiB','Memória residente deste processo, não a soma de todos os serviços.'),('CPU acumulada',cpu|duration,'','Tempo total de processamento desde o início do painel, não porcentagem atual.'),('Disco livre',(disk_free/1073741824)|round(1),'GiB','Espaço no volume da configuração privada. Um GiB corresponde a 1.073.741.824 bytes.')] %}<article>
+<span>{{ name }} {{ help(tip) }}</span>
+<strong>{{ value }} {{ unit }}</strong>
+</article>{% endfor %}</div>
+<details>
+<summary>Tabelas e versão {{ help('Maiores tabelas com índices e versão efetiva das migrações. Nomes técnicos são mantidos para diagnóstico.') }}</summary>{% for t in tables %}<p>{{ t.relname }}: {{ (t.bytes/1048576)|round(2) }} MiB</p>{% endfor %}<p>Migração {{ migration }} · Painel ativo há {{ uptime|duration }}.</p>
+</details>
+<div class="toolbar">{% for action,name,tip in [('cleanup','Limpar dados vencidos','Executa a política de conservação. Remove dados vencidos; não zera o banco.'),('retry','Reavaliar novas tentativas seguras','Antecipa até cinquenta tentativas seguras. Revalida avisos antigos e não inclui resultados não confirmados.')] %}<form method="post" action="/operations">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="action" value="{{ action }}">
+<button class="secondary">{{ name }}</button>{{ help(tip) }}</form>{% endfor %}</div>
+</section>
+<section id="records">
+<div class="section-head">
+<h2>Registros e diagnóstico {{ help('Eventos agregados sem conteúdo de conversas ou identificadores. Códigos desconhecidos recebem explicação segura e permanecem no detalhe técnico.') }}</h2>
+<a href="/events.csv">Exportar até 500 eventos</a>{{ help('Baixa datas e códigos sanitizados. Não é backup; use o script de exportação cifrada para preservar a instância.') }}</div>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>Data · Brasília</th>
+<th>Atividade</th>
+<th>Resultado</th>
+<th>Detalhe opcional</th>
+</tr>
+</thead>
+<tbody>{% for e in events %}<tr>
+<td>{{ e.created|brdate(ops.timezone) }}</td>
+<td>{{ e.category|label }}</td>
+<td>{{ e.code|label }}</td>
+<td>
+<details>
+<summary>Código e agregados</summary>
+<pre>{{ e.category }} / {{ e.code }}
+{{ e.values|tojson(indent=2) }}</pre>
+</details>
+</td>
+</tr>{% else %}<tr>
+<td colspan="4">Nenhum evento registrado.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section id="password">
+<h2>Trocar senha administrativa {{ help('Exige a senha atual e encerra todas as sessões após salvar. Não altera chaves, banco ou inscrições.') }}</h2>
+<form class="config" method="post" action="/password">
+<input type="hidden" name="csrf" value="{{ csrf }}">{% for key,name,tip in [('current','Senha atual','Confirma acesso à credencial atual. Não aparece em registros ou métricas.'),('password','Nova senha (12–256 caracteres)','Escolha uma senha exclusiva. Será guardada como hash, sem registrar o texto.'),('confirm','Confirme a nova senha','Repita para evitar erro de digitação. As duas entradas precisam coincidir.')] %}<label>{{ name }} {{ help(tip) }}<input type="password" name="{{ key }}" required maxlength="256" {{ 'minlength=12' if key != 'current' }} autocomplete="{{ 'current-password' if key == 'current' else 'new-password' }}">
+</label>{% endfor %}<button>Trocar senha e encerrar sessões</button>{{ help('Valida a senha atual, salva a nova senha e encerra todas as sessões administrativas.') }}</form>
+</section>
+<footer>VagasUnB (Extraordinária) · Gratuito, independente e sem garantia de vaga.</footer>
+</main>
+</body>
+</html>

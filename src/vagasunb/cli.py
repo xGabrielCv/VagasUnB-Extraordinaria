@@ -1,5 +1,5 @@
 import argparse
-import asyncio
+from vagasunb import run_async
 import getpass
 import json
 import logging
@@ -60,6 +60,12 @@ async def command(args):
                 raise ValueError("Reset exige modo demo e --confirm; produção recusada")
             async with db.transaction() as s:
                 # Preserve administrator and instance keys; remove only application demo data.
+                from vagasunb.db import Classroom
+
+                if await s.scalar(
+                    select(Classroom.id).where(~Classroom.period.startswith("DEMO")).limit(1)
+                ):
+                    raise ValueError("Reset recusado: o catálogo contém dados públicos")
                 keep = {"admins", "admin_sessions", "settings"}
                 for table in reversed(Base.metadata.sorted_tables):
                     if table.name not in keep:
@@ -115,7 +121,9 @@ async def command(args):
             )
         elif args.action == "diagnose":
             async with db.transaction() as s:
-                from vagasunb.services import options
+                from vagasunb.services import options, verify_instance
+
+                await verify_instance(s, Vault(cfg.secrets), cfg.mode)
 
                 ops = await options(s)
                 print(
@@ -124,7 +132,7 @@ async def command(args):
                             "mode": cfg.mode,
                             "database": "PostgreSQL",
                             "quarantine": ops["quarantine"],
-                            "keys": "present",
+                            "keys": "valid",
                             "telegram": "disabled"
                             if cfg.mode != "telegram"
                             else "requires explicit enable",
@@ -136,10 +144,9 @@ async def command(args):
 
 
 def main():
-    logging.disable(logging.CRITICAL)
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s")
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
     for name in ("httpx", "httpcore", "telegram", "sqlalchemy", "uvicorn.access"):
-        logging.getLogger(name).disabled = True
+        logging.getLogger(name).setLevel(logging.CRITICAL + 1)
     parser = argparse.ArgumentParser(description="Operação VagasUnB (Extraordinária)")
     parser.add_argument(
         "action",
@@ -158,8 +165,20 @@ def main():
         ],
     )
     parser.add_argument("--confirm", action="store_true")
-    parser.add_argument("--directory", default=".private/exports")
-    parser.add_argument("--key", default=".private/secrets/backup_key")
+    parser.add_argument(
+        "--directory", default=str(Path(os.getenv("VAGAS_PRIVATE", ".private")) / "exports")
+    )
+    parser.add_argument(
+        "--key",
+        default=str(
+            Path(
+                os.getenv(
+                    "VAGAS_SECRETS", str(Path(os.getenv("VAGAS_PRIVATE", ".private")) / "secrets")
+                )
+            )
+            / "backup_key"
+        ),
+    )
     parser.add_argument("--package")
     parser.add_argument("--new-keys")
     args = parser.parse_args()
@@ -170,17 +189,18 @@ def main():
         elif args.action == "worker":
             from vagasunb.worker import run
 
-            asyncio.run(run())
+            run_async(run())
         elif args.action == "bot":
             from vagasunb.telegram import run_bot
 
             run_bot(Settings.load())
         else:
-            asyncio.run(command(args))
-    except (Exception, KeyboardInterrupt):
-        # Never print repr/tracebacks of network/DB exceptions containing secret URLs.
+            run_async(command(args))
+    except (Exception, KeyboardInterrupt) as exc:
+        from vagasunb.operations import error_code
+
         print(
-            "Operação interrompida ou configuração inválida. Confira modo, pré-requisitos, banco e arquivos de segredo; nenhum dado foi zerado automaticamente."
+            f"Falha operacional: {error_code(exc)}. Verifique status/logs e pré-requisitos; dados e chaves não foram redefinidos."
         )
         raise SystemExit(1) from None
 

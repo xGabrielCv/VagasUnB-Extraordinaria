@@ -44,6 +44,8 @@ def test_empty_is_explicit_and_unknown_not_zero():
     assert parse_results(EMPTY, "11", "2040.1") == []
     rows = parse_results(RESULT.replace("<td>29</td>", "<td>?</td>"), "11", "2040.1")
     assert rows[0]["occupied"] is None
+    over = parse_results(RESULT.replace("<td>29</td>", "<td>40</td>"), "11", "2040.1")
+    assert over[0]["offered"] == 30 and over[0]["occupied"] == 40
 
 
 @pytest.mark.parametrize(
@@ -53,7 +55,6 @@ def test_empty_is_explicit_and_unknown_not_zero():
         RESULT.replace("Ocupadas", "Changed"),
         RESULT.replace("<td>29</td>", ""),
         RESULT.replace("2040.1", "2040.2"),
-        RESULT.replace("<td>29</td>", "<td>40</td>"),
         '<table class="listagem"><tr><th>Turma Vagas Ocupadas</th></tr></table>',
     ],
 )
@@ -90,3 +91,41 @@ async def test_changed_form_never_posts():
     with pytest.raises(SourceError):
         await PublicSource(httpx.MockTransport(fake)).collect("11", "2040.1")
     assert "POST" not in calls
+
+
+async def test_discovery_levels_and_reuse_valid_response_viewstate():
+    form = FORM.replace(
+        '<option value="G">G</option>',
+        '<option value="G">G</option><option value="M">Mestrado</option>',
+    )
+    calls = []
+
+    def fake(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, text="home" if request.url.path == HOME else form + RESULT)
+
+    source = PublicSource(httpx.MockTransport(fake))
+    try:
+        metadata = await source.discover()
+        assert [v["id"] for v in metadata["levels"]] == ["G", "M"]
+        await source.discover()
+        await source.collect("11", "2040.1", "G")
+        await source.collect("11", "2040.1", "M")
+        assert calls == [("GET", HOME), ("GET", PATH), ("POST", PATH), ("POST", PATH)]
+        assert source.bytes > 0
+    finally:
+        await source.aclose()
+
+
+async def test_discovery_does_not_truncate_units():
+    options = "".join(f'<option value="{i}">Unit {i}</option>' for i in range(1, 401))
+    form = FORM.replace('<option value="11">Unidade sintética</option>', options)
+
+    def fake(request):
+        return httpx.Response(200, text=form)
+
+    source = PublicSource(httpx.MockTransport(fake))
+    try:
+        assert len((await source.discover())["units"]) == 400
+    finally:
+        await source.aclose()

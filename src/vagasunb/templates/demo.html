@@ -1,1 +1,78 @@
-<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Simulador · VagasUnB (Extraordinária)</title><link rel="stylesheet" href="/assets/style.css"><script src="/assets/demo.js" defer></script><body><main class="demo-shell"><header><div><span class="eyebrow">LABORATÓRIO OFFLINE</span><h1>Experimente o bot</h1><p>O mesmo roteador, as mesmas regras. Nenhuma chamada ao Telegram ou SIGAA.</p></div><a class="button secondary" href="/">← Painel</a></header><div class="notice">DEMO · Todos os dados são sintéticos. Alertas enviados pelo worker aparecem no contador do painel; “Despachar agora” mostra os alertas que essa ação enviar.</div><div class="demo-grid"><section class="phone"><div class="phone-header"><b>VagasUnB (Extraordinária)</b><span>Transporte simulado</span></div><label>Destinatário sintético<select id="recipient"><option value="1">Demonstração A</option><option value="2">Demonstração B</option><option value="3">Demonstração C</option></select></label><article id="message">Envie /start para iniciar.</article><div id="buttons"></div><form id="interact"><input type="hidden" id="csrf" value="{{ csrf }}"><input id="text" placeholder="/start ou busque uma disciplina" maxlength="120" autocomplete="off"><button>Enviar →</button></form><div id="alerts"></div></section><section><article><span class="eyebrow">CONTROLE DA FONTE SIMULADA</span><h2>Abra uma vaga</h2><p>Ative o monitoramento, altere 0 → 1 vaga e observe novamente após 10 s. A segunda observação confirma a abertura. Aguarde 3 s para o agrupamento e despache.</p><form id="vacancy"><label>Turma<select id="cid">{% for c in classes %}<option value="{{ c.id }}">{{ c.code }} · {{ c.number }} · {{ c.name }}</option>{% endfor %}</select></label><label>Vagas disponíveis (0 a 30)<input id="available" type="number" min="0" max="30" value="1" required></label><button>Atualizar e observar</button></form><button id="dispatch" class="secondary">Despachar agora</button><p id="feedback" role="status"></p></article><article><h3>Roteiro rápido</h3><ol><li>Envie /start e busque DEMO0001.</li><li>Escolha turma → monitorar → confirmar.</li><li>Abra uma vaga na mesma turma e confirme com nova observação.</li><li>No alerta, experimente continuar, concluir ou parar.</li><li>Envie /apagar_dados, confirme e tente /menu.</li></ol><p class="muted">Trocar destinatário limpa a visualização; conversas e buscas não são persistidas. Botões expiram em 15 min e são de uso único.</p></article></section></div></main></body></html>
+{% from 'help.html' import help %}
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador · VagasUnB (Extraordinária)</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/demo.js" defer>
+</script>
+<script src="/assets/help.js" defer></script>
+<body>
+<main class="demo-shell">
+<header>
+<div>
+<span class="eyebrow">LABORATÓRIO DE SIMULAÇÃO</span>
+<h1>Experimente o bot</h1>
+<p>O mesmo roteador e as mesmas regras, sem mensagens ao Telegram. A conversa usa apenas o catálogo local.</p>
+</div>
+<a class="button secondary" href="/">← Painel</a>
+</header>
+<div class="notice">Destinatários fictícios · Catálogo: {{ source|label }}. Somente a fonte de demonstração permite alterar vagas. Avisos simulados aparecem abaixo da conversa. {{ help('A simulação não cria mensagens externas. Se o painel estiver coletando catálogo público, os dados locais podem ser reais; o controle de vagas fica bloqueado nessa fonte.') }}</div>
+<div class="demo-grid">
+<section class="phone">
+<div class="phone-header">
+<b>VagasUnB (Extraordinária)</b>
+<span>Transporte simulado</span>
+</div>
+<label>Destinatário fictício {{ help('Escolha uma das três conversas de demonstração. Trocar limpa a visualização, sem gravar conversa ou busca textual.') }}<select id="recipient">
+<option value="1">Demonstração A</option>
+<option value="2">Demonstração B</option>
+<option value="3">Demonstração C</option>
+</select>
+</label>
+<article id="message">Envie /start para iniciar.</article>
+<div id="buttons">
+</div>
+<form id="interact">
+<input type="hidden" id="csrf" value="{{ csrf }}">
+<input id="text" placeholder="/start ou busque uma disciplina" maxlength="120" autocomplete="off">
+<button>Enviar →</button>
+{{ help('Envia o comando ao simulador local. Use /start para cadastrar conscientemente e /apagar_dados para testar a exclusão. Não chama a API do Telegram.') }}
+</form>
+<div id="alerts">
+</div>
+</section>
+<section>
+<article>
+<span class="eyebrow">CONTROLE DA FONTE SIMULADA</span>
+<h2>Abra uma vaga</h2>
+<p>Ative o monitoramento, altere 0 → 1 vaga e observe novamente após 10 s. A segunda observação confirma a abertura. Aguarde 3 s para o agrupamento e despache.</p>
+<form id="vacancy">
+<label>Turma {{ help('Escolha a mesma turma monitorada no simulador. Somente turmas de demonstração podem ser alteradas, nunca o SIGAA.') }}<select id="cid">{% for c in classes %}<option value="{{ c.id }}">{{ c.code }} · {{ c.number }} · {{ c.name }}</option>{% endfor %}</select>
+</label>
+<label>Vagas disponíveis (0 a 30) {{ help('Muda a fonte fictícia local e observa a turma. Zero para uma vaga exige outra observação válida após o tempo de confirmação configurado.') }}<input id="available" type="number" min="0" max="30" value="1" required>
+</label>
+<button>Atualizar e observar</button>
+{{ help('Publica uma leitura da fonte de demonstração. Não altera dados oficiais. Use novamente após o tempo de confirmação para confirmar a abertura.') }}
+</form>
+<button id="dispatch" class="secondary">Simular envio agora</button>{{ help('Processa avisos elegíveis respeitando pausa, agenda e validade. A simulação não envia mensagens ao Telegram.') }}
+<p id="feedback" role="status">
+</p>
+</article>
+<article>
+<h3>Roteiro rápido</h3>
+<ol>
+<li>Envie /start e busque DEMO0001.</li>
+<li>Escolha turma → monitorar → confirmar.</li>
+<li>Abra uma vaga na mesma turma e confirme com nova observação.</li>
+<li>No alerta, experimente continuar, concluir ou parar.</li>
+<li>Envie /apagar_dados, confirme e tente /menu.</li>
+</ol>
+<p class="muted">Trocar destinatário limpa a visualização; conversas e buscas não são persistidas. Botões expiram em 15 min e são de uso único.</p>
+</article>
+</section>
+</div>
+</main>
+</body>
+</html>

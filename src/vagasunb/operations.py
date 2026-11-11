@@ -2,6 +2,33 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
+def error_code(error):
+    from sqlalchemy.exc import OperationalError, IntegrityError
+
+    if isinstance(error, OperationalError):
+        return "database_unavailable"
+    if isinstance(error, IntegrityError):
+        return "data_conflict"
+    if getattr(error, "code", None) in {
+        "rate_limit",
+        "access_restricted",
+        "changed_form",
+        "session_expired",
+        "http_unavailable",
+        "network_unavailable",
+        "identity_conflict",
+        "circuit_open",
+    }:
+        return error.code
+    if isinstance(error, ValueError):
+        if any(word in str(error).lower() for word in ("chave", "integridade")):
+            return "key_missing_or_incompatible"
+        return "configuration_or_key_invalid"
+    if isinstance(error, FileNotFoundError):
+        return "runtime_file_missing"
+    return "internal_failure"
+
+
 def maintain_logs(directory, at=None, max_bytes=100 * 1024 * 1024):
     """Bound only this instance's named runtime logs, never arbitrary host logs."""
     directory = Path(directory).resolve()

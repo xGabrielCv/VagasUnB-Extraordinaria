@@ -52,10 +52,22 @@ async def seed(s, mode):
 
 
 class DemoSource:
+    complete = True
+    kind = "demo"
+
     def __init__(self, db):
         self.db = db
 
-    async def collect(self, scope, period):
+    async def discover(self):
+        async with self.db.transaction() as s:
+            row = await s.get(Setting, "demo_source")
+            units = sorted({u for r in row.value["rows"] for u in r["units"]}) if row else []
+            return {
+                "units": [{"id": u, "name": u} for u in units],
+                "levels": [{"id": "G", "name": "Sintético"}],
+            }
+
+    async def collect(self, scope, period, level="G"):
         async with self.db.transaction() as s:
             cfg = await s.get(Setting, "demo_source")
             return [r for r in cfg.value["rows"] if scope in r["units"] and r["period"] == period]

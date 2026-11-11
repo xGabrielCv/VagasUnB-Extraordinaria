@@ -90,6 +90,8 @@ async def test_production_has_no_demo_endpoints(settings):
 
 
 async def test_login_rate_limit(db, settings):
+    async with db.transaction() as s:
+        s.add(Admin(id=1, password=PasswordHasher().hash(secrets.token_urlsafe(20))))
     app = create_app(settings)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"

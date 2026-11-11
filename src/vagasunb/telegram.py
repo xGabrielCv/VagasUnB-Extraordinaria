@@ -7,6 +7,73 @@ import time
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.request import BaseRequest
+from telegram.request import HTTPXRequest
+
+
+class BudgetRequest(HTTPXRequest):
+    """All outgoing message flows use the same PostgreSQL budget, across processes."""
+
+    def __init__(self, db, vault):
+        super().__init__()
+        from vagasunb.distribution import SendBudget
+
+        self.budget, self.db, self.vault = SendBudget(db), db, vault
+        self.unregistered = {}
+        self.local_lock = asyncio.Lock()
+
+    async def do_request(self, url, method, request_data=None, **kwargs):
+        api = url.rsplit("/", 1)[-1]
+        if api in {"sendMessage", "editMessageText"}:
+            from vagasunb.distribution import send_permit
+
+            params = request_data.parameters if request_data else {}
+            permit = send_permit.get()
+            prepaid = bool(
+                api == "sendMessage"
+                and permit
+                and "chat_id" in params
+                and permit[1] == self.vault.index(params["chat_id"])
+            )
+            if prepaid:
+                send_permit.set(None)
+            else:
+                await self.acquire(params)
+        result = await super().do_request(url, method, request_data, **kwargs)
+        if result[0] == 429:
+            try:
+                delay = int(json.loads(result[1]).get("parameters", {}).get("retry_after", 60))
+            except (ValueError, TypeError):
+                delay = 60
+            await self.budget.defer(max(1, delay))
+        return result
+
+    async def acquire(self, params):
+        from sqlalchemy import select
+        from vagasunb.db import Recipient
+
+        async with self.db.transaction() as s:
+            rid = (
+                await s.scalar(
+                    select(Recipient.id).where(
+                        Recipient.lookup == self.vault.index(params["chat_id"])
+                    )
+                )
+                if "chat_id" in params
+                else None
+            )
+        if rid is None and "chat_id" in params:
+            key = self.vault.index(params["chat_id"])
+            while True:
+                async with self.local_lock:
+                    clock = time.monotonic()
+                    self.unregistered = {k: v for k, v in self.unregistered.items() if v > clock}
+                    delay = self.unregistered.get(key, 0) - clock
+                    if delay <= 0:
+                        self.unregistered[key] = clock + 1
+                        break
+                await asyncio.sleep(delay)
+        if await self.budget.wait(rid) is False:
+            raise Forbidden("Destinatário indisponível")
 
 
 class DeliveryError(Exception):
@@ -16,11 +83,12 @@ class DeliveryError(Exception):
 
 
 class FakeTransport:
-    def __init__(self):
-        self.views = []  # Ephemeral only; never persists chat IDs or conversation content.
+    def __init__(self, record=True):
+        self.views = [] if record else None  # Test-only capture; worker retains no messages.
 
     async def send(self, chat_id, view):
-        self.views.append(view)
+        if self.views is not None:
+            self.views.append(view)
 
 
 class FakeRequest(BaseRequest):
@@ -63,21 +131,19 @@ def markup(view):
 
 
 class TelegramTransport:
+    real_enabled = True
+
     def __init__(self, bot: Bot):
         self.bot = bot
-        self.next_send = 0.0
 
     async def send(self, chat_id, view):
-        # Conservative sequential global limit; same-chat cooldown enforced in outbox.
-        await asyncio.sleep(max(0, self.next_send - time.monotonic()))
         try:
             await self.bot.send_message(
                 chat_id=int(chat_id),
-                text=view.text[:3900],
+                text=view.text,
                 reply_markup=markup(view),
                 parse_mode="HTML",
             )
-            self.next_send = time.monotonic() + 1
         except RetryAfter as exc:
             delay = (
                 exc.retry_after.total_seconds()
@@ -107,7 +173,14 @@ async def handle_update(update, context, db, vault):
 
     async with db.transaction() as s:
         view = await route(
-            s, vault, chat.id, command_text, callback, private=True, sender_matches=True
+            s,
+            vault,
+            chat.id,
+            command_text,
+            callback,
+            private=True,
+            sender_matches=True,
+            synthetic=False,
         )
     if query:
         try:
@@ -135,7 +208,7 @@ def run_bot(settings):
     from vagasunb.crypto import Vault
     from vagasunb.db import Database
 
-    if settings.mode != "telegram" or os.getenv("VAGAS_TELEGRAM_ENABLE") != "1":
+    if settings.mode != "public" or os.getenv("VAGAS_TELEGRAM_ENABLE") != "1":
         raise RuntimeError(
             "Telegram exige modo telegram e habilitação explícita; token sozinho não ativa"
         )
@@ -177,7 +250,14 @@ def run_bot(settings):
             await state["connection"].close()
         await db.close()
 
-    app = ApplicationBuilder().token(token).post_init(startup).post_shutdown(shutdown).build()
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .request(BudgetRequest(db, vault))
+        .post_init(startup)
+        .post_shutdown(shutdown)
+        .build()
+    )
     handler = partial(handle_update, db=db, vault=vault)
     app.add_handler(CallbackQueryHandler(handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handler))

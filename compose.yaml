@@ -58,6 +58,9 @@ services:
       retries: 5
   worker:
     <<: *app
+    # Network capability is used only when the operator selects the public source.
+    # Demo mode still refuses the real Telegram transport.
+    networks: [internal, outgoing]
     command: [python, -m, vagasunb.cli, worker]
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -86,3 +89,4 @@ volumes:
   demo_postgres:
 networks:
   internal: {internal: true}
+  outgoing:

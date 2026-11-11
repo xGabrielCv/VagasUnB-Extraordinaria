@@ -137,7 +137,7 @@ async def test_window_expiry_refuses_new_subscriptions(db, vault):
             await subscribe(s, r.id, "DEMO0001", "DEMO.1", [])
 
 
-async def test_synthetic_benchmark(db, vault):
+async def test_synthetic_benchmark(db, vault, tmp_path):
     started = time.perf_counter()
     async with db.transaction() as s:
         for i in range(100):
@@ -169,6 +169,6 @@ async def test_synthetic_benchmark(db, vault):
         "setup_ms": round(setup_ms, 2),
     }
     # Private result, never staged or included in build context.
-    destination = Path(os.environ.get("VAGAS_BENCH_OUT", ".private/benchmark.json"))
+    destination = Path(os.environ.get("VAGAS_BENCH_OUT", tmp_path / "benchmark.json"))
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(result))

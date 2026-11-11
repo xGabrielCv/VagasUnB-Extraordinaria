@@ -48,10 +48,21 @@ def export(settings, destination, key_file, max_bytes=100 * 1024 * 1024):
         if result.returncode:
             raise RuntimeError("pg_dump falhou; saída privada não registrada")
         data = dump.read_bytes()
+        import psycopg
+
+        pg = pg_environment(settings.database_url)
+        with psycopg.connect(
+            host=pg["PGHOST"],
+            port=pg["PGPORT"],
+            user=pg["PGUSER"],
+            password=pg["PGPASSWORD"],
+            dbname=pg["PGDATABASE"],
+        ) as connection:
+            version = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         manifest = json.dumps(
             {
                 "format": 1,
-                "schema": "0002",
+                "schema": version,
                 "mode": settings.mode,
                 "created": datetime.now(UTC).isoformat(),
                 "sha256": hashlib.sha256(data).hexdigest(),
@@ -104,7 +115,7 @@ async def restore(db, settings, package, key_file):
     dump = raw[4 + length :]
     if (
         manifest["format"] != 1
-        or manifest["schema"] != "0002"
+        or manifest["schema"] not in {"0002", "0003", "0004"}
         or manifest["mode"] != settings.mode
         or hashlib.sha256(dump).hexdigest() != manifest["sha256"]
     ):
@@ -133,6 +144,16 @@ async def restore(db, settings, package, key_file):
             s, {"quarantine": True, "collect_paused": True, "dispatch_paused": True}
         )
     # Commit quarantine BEFORE any key validation, so wrong keys cannot roll it back.
+    from alembic import command
+    from alembic.config import Config
+
+    def upgrade(connection):
+        cfg = Config("alembic.ini")
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
+
+    async with db.engine.begin() as connection:
+        await connection.run_sync(upgrade)
     async with db.transaction() as s:
         from sqlalchemy import delete
 

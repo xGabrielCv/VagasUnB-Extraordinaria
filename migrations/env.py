@@ -1,4 +1,4 @@
-import asyncio
+from vagasunb import run_async
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 from vagasunb.config import Settings
@@ -18,4 +18,7 @@ async def main():
     await engine.dispose()
 
 
-asyncio.run(main())
+if context.config.attributes.get("connection") is not None:
+    run(context.config.attributes["connection"])
+else:
+    run_async(main())

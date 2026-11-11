@@ -5,6 +5,6 @@ $ptr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
 try {
     $plain=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
     if ($plain -notmatch '^\d+:[A-Za-z0-9_-]{20,}$') { throw 'Formato de token inválido.' }
-    [IO.File]::WriteAllText((Join-Path $ProjectRoot '.private/secrets/telegram_token'),$plain)
+    [IO.File]::WriteAllText((Join-Path $PrivateRoot 'secrets/telegram_token'),$plain)
 } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr); $plain=$null }
 Write-Host 'Token gravado privadamente. Nenhum método Telegram foi chamado; modo e serviços não foram alterados.'

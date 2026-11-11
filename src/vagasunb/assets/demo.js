@@ -35,7 +35,7 @@ async function fetchAlerts() {
 }
 $('recipient').addEventListener('change', () => seenAlerts.clear());
 $('dispatch').onclick = async () => {
-  try { await post('/demo/dispatch', {}); await fetchAlerts(); $('feedback').textContent='Despacho verificado. Alertas elegíveis aparecem abaixo da conversa.'; }
+  try { await post('/demo/dispatch', {}); await fetchAlerts(); $('feedback').textContent='Simulação verificada. Alertas elegíveis aparecem abaixo da conversa.'; }
   catch(e) { $('feedback').textContent=e.message; }
 };
 setInterval(fetchAlerts, 5000);

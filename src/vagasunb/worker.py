@@ -4,13 +4,14 @@ import signal
 import time
 from pathlib import Path
 
+from vagasunb.collection import collect_catalog, next_delay
 from vagasunb.config import Settings
 from vagasunb.crypto import Vault
-from sqlalchemy import select
-from vagasunb.db import Classroom, Database, Event, Setting, Subscription, now
+from vagasunb.db import Database, Event, Setting, now
 from vagasunb.demo import DemoSource
-from vagasunb.monitor import collect_scope, dispatch_once
+from vagasunb.distribution import SendBudget, dispatch_batch
 from vagasunb.services import cleanup, options, verify_instance
+from vagasunb.schedule import allowed, state
 from vagasunb.sigaa_public import PublicSource
 from vagasunb.telegram import FakeTransport
 
@@ -21,143 +22,148 @@ async def run(settings=None):
     async with db.transaction() as s:
         await verify_instance(s, vault, cfg.mode)
     stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
     try:
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop.set)
+            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
     except NotImplementedError:
         pass
-    source = DemoSource(db) if cfg.mode == "demo" else PublicSource()
     health = {"collect": "starting", "dispatch": "starting", "cleanup": "starting"}
+    demo, public = DemoSource(db), PublicSource()
+    fake = FakeTransport(record=False)
+    budget = SendBudget(db)
+    last_start = 0.0
     real_bot = None
-    transport = FakeTransport()
-    if cfg.mode == "telegram" and os.getenv("VAGAS_TELEGRAM_ENABLE") == "1":
+    if cfg.mode == "public" and os.getenv("VAGAS_TELEGRAM_ENABLE") == "1":
         from telegram import Bot
-        from vagasunb.telegram import TelegramTransport
+        from vagasunb.telegram import BudgetRequest, TelegramTransport
 
-        real_bot = Bot((cfg.secrets / "telegram_token").read_text().strip())
+        real_bot = Bot(
+            (cfg.secrets / "telegram_token").read_text().strip(), request=BudgetRequest(db, vault)
+        )
         await real_bot.initialize()
         transport = TelegramTransport(real_bot)
-
-    last_structural = 0.0
+    else:
+        transport = fake
 
     async def collector():
-        nonlocal last_structural
-        async with db.transaction() as s:
-            ops = await options(s)
-            req = await s.get(Setting, "collect_request")
-            requested = req.value["scope"] if req else None
-            if req:
-                await s.delete(req)
-            monitored_codes = set(
-                (
-                    await s.scalars(
-                        select(Subscription.code).where(Subscription.period == ops["period"])
-                    )
-                ).all()
+        nonlocal last_start
+        while not stop.is_set():
+            async with db.transaction() as s:
+                ops = await options(s)
+                request = await s.get(Setting, "collect_request")
+                requested = bool(request)
+            source = public if ops["source"] == "public" else demo
+            delay = next_delay(
+                last_start, ops["interval"], source.next_attempt if source is public else 0
             )
-            classes = (
-                await s.scalars(
-                    select(Classroom).where(
-                        Classroom.period == ops["period"], Classroom.code.in_(monitored_codes)
-                    )
-                )
-            ).all()
-            monitored_units = {unit for c in classes for unit in c.units}
-        structural_due = time.monotonic() - last_structural >= ops["structural_interval"]
-        if requested:
-            scopes = [requested]
-        elif structural_due:
-            scopes = ops["scopes"]
-            last_structural = time.monotonic()
-        else:
-            scopes = [unit for unit in ops["scopes"] if unit in monitored_units]
-        results = []
-        for scope in scopes:
-            if stop.is_set():
-                break
-            results.append(await collect_scope(db, source, scope, cfg.mode))
-        return max(1, ops["interval"]), all(results)
+            if (
+                allowed(ops, "collect", now())
+                and (requested or (ops["collection_auto"] and delay <= 0))
+                and time.monotonic() >= getattr(source, "next_attempt", 0)
+            ):
+                if requested:
+                    async with db.transaction() as s:
+                        request = await s.get(Setting, "collect_request")
+                        if request:
+                            await s.delete(request)
+                last_start = time.monotonic()
+                health["collect"] = "running"
+                result = await collect_catalog(db, source, cfg.mode)
+                health["collect"] = "ok" if result["status"] == "complete" else result["status"]
+            elif not allowed(ops, "collect", now()):
+                health["collect"] = state(ops, "collect", now())["reason"]
+            elif not ops["collection_auto"]:
+                health["collect"] = "manual"
+            elif health["collect"] in {"paused", "scheduled", "manual", "starting"}:
+                health["collect"] = "waiting"
+            await asyncio.sleep(0.5)
 
     async def dispatcher():
-        if cfg.mode == "demo":
-            await dispatch_once(db, vault, FakeTransport(), "demo")
-        elif real_bot:
-            await dispatch_once(db, vault, transport, "telegram")
-        return 1
+        while not stop.is_set():
+            health["dispatch"] = "running"
+            if cfg.mode == "demo" or real_bot:
+                await dispatch_batch(
+                    db,
+                    vault,
+                    transport,
+                    "demo" if cfg.mode == "demo" else "public",
+                    budget=budget,
+                )
+            async with db.transaction() as s:
+                ops = await options(s)
+            health["dispatch"] = (
+                state(ops, "dispatch", now())["reason"]
+                if not allowed(ops, "dispatch", now())
+                else ("simulated" if cfg.mode == "demo" else "enabled" if real_bot else "disabled")
+            )
+            await asyncio.sleep(0.1)
 
     async def cleaner():
-        async with db.transaction() as s:
-            await cleanup(s)
-        from vagasunb.operations import maintain_logs
-
-        maintain_logs(os.getenv("VAGAS_PRIVATE", ".private"))
-        return 3600
-
-    async def supervise(name, action):
         while not stop.is_set():
-            delay = 5
+            async with db.transaction() as s:
+                await cleanup(s)
+            from vagasunb.operations import maintain_logs
+
+            maintain_logs(cfg.private_dir)
+            health["cleanup"] = "ok"
+            await asyncio.sleep(3600)
+
+    async def supervised(name, action):
+        while not stop.is_set():
             try:
-                delay = await action()
-                if isinstance(delay, tuple):
-                    delay, valid = delay
-                    health[name] = "ok" if valid else "degraded"
-                else:
-                    health[name] = "ok"
-            except Exception:
-                health[name] = "degraded"
+                await action()
+            except Exception as exc:
+                from vagasunb.operations import error_code
+
+                health[name] = error_code(exc)
                 try:
                     async with db.transaction() as s:
-                        s.add(
-                            Event(category="worker", code="task_recovered", values={"task": name})
-                        )
+                        s.add(Event(category="worker", code=error_code(exc), values={"task": name}))
                 except Exception:
-                    pass  # DB outage must not kill the supervisor itself.
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=delay)
-            except TimeoutError:
-                pass
+                    pass
+                await asyncio.sleep(3)
 
     tasks = [
-        asyncio.create_task(supervise(name, fn))
+        asyncio.create_task(supervised(name, fn))
         for name, fn in [("collect", collector), ("dispatch", dispatcher), ("cleanup", cleaner)]
     ]
     try:
         while not stop.is_set():
-            if Path(".private/shutdown").exists():
-                stop.set()
+            if (cfg.private_dir / "shutdown").exists():
                 break
-            if any(task.done() for task in tasks):
-                raise RuntimeError("Tarefa supervisionada terminou inesperadamente")
+            if any(t.done() for t in tasks):
+                raise RuntimeError("worker_task_ended")
             try:
                 async with db.transaction() as s:
+                    ops = await options(s)
+                    delay = next_delay(last_start, ops["interval"], public.next_attempt)
                     await s.merge(
                         Setting(
                             key="worker_health",
                             value={
                                 **health,
+                                "pid": os.getpid(),
                                 "at": now().isoformat(),
-                                "circuit_failures": getattr(source, "failures", 0),
-                                "circuit_wait_s": round(
-                                    max(0, getattr(source, "next_attempt", 0) - time.monotonic())
+                                "next_attempt_s": round(delay, 2),
+                                "desired_s": ops["interval"],
+                                "backoff_s": round(
+                                    max(0, public.next_attempt - time.monotonic()), 2
                                 ),
                             },
                         )
                     )
+                directory = Path(os.getenv("VAGAS_HEARTBEAT_DIR", str(cfg.private_dir)))
+                directory.mkdir(exist_ok=True)
+                (directory / "worker.heartbeat").write_text(str(time.time()))
             except Exception:
-                # No heartbeat is written while database is unreachable: health degrades visibly.
-                await asyncio.sleep(2)
-                continue
-            heartbeat_dir = Path(os.getenv("VAGAS_HEARTBEAT_DIR", ".private"))
-            heartbeat_dir.mkdir(exist_ok=True)
-            (heartbeat_dir / "worker.heartbeat").write_text(str(time.time()))
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=5)
-            except TimeoutError:
-                pass
+                pass  # Stale DB and file heartbeats visibly degrade health.
+            await asyncio.sleep(2)
     finally:
         stop.set()
+        for task in tasks:
+            task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await public.aclose()
         if real_bot:
             await real_bot.shutdown()
         await db.close()

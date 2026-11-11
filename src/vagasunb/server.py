@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from pathlib import Path
 import uvicorn
 
 
@@ -9,20 +8,33 @@ def selector_factory():
 
 
 async def serve():
+    from vagasunb.config import Settings
+    from vagasunb.crypto import Vault
+    from vagasunb.db import Database
+    from vagasunb.services import verify_instance
+
+    cfg = Settings.load()
+    database = Database(cfg.database_url)
+    try:
+        async with database.transaction() as s:
+            await verify_instance(s, Vault(cfg.secrets), cfg.mode)
+    finally:
+        await database.close()
     server = uvicorn.Server(
         uvicorn.Config(
             "vagasunb.admin:create_app",
             factory=True,
             host="127.0.0.1",
-            port=8765,
+            port=int(cfg.host.rsplit(":", 1)[1]),
             access_log=False,
             log_level="critical",
+            proxy_headers=False,
         )
     )
 
     async def shutdown_watch():
         while not server.should_exit:
-            if Path(".private/shutdown").exists():
+            if (cfg.private_dir / "shutdown").exists():
                 server.should_exit = True
                 return
             await asyncio.sleep(0.5)
@@ -36,7 +48,12 @@ async def serve():
 
 
 if __name__ == "__main__":
-    logging.disable(logging.CRITICAL)
     for name in ("httpx", "httpcore", "telegram", "sqlalchemy"):
-        logging.getLogger(name).disabled = True
-    asyncio.run(serve(), loop_factory=selector_factory)
+        logging.getLogger(name).setLevel(logging.CRITICAL + 1)
+    try:
+        asyncio.run(serve(), loop_factory=selector_factory)
+    except Exception as error:
+        from vagasunb.operations import error_code
+
+        print("Falha no servidor: " + error_code(error))
+        raise SystemExit(1) from None

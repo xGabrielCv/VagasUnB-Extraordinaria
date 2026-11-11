@@ -1,5 +1,5 @@
 ﻿. "$PSScriptRoot/common.ps1"
-if (-not (Test-Path -LiteralPath '.private/native.json')) {
+if (-not (Test-Path -LiteralPath (Join-Path $PrivateRoot 'native.json'))) {
     Assert-Docker
     try {
         & docker compose --file compose.test.yaml --project-name vagasunb-extraordinaria-test up --build --abort-on-container-exit --exit-code-from tests

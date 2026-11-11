@@ -1,11 +1,16 @@
 import hashlib
+import hmac
+import asyncio
+import os
 import secrets
 import shutil
 import time
+import json
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psutil
 from argon2 import PasswordHasher
@@ -30,6 +35,7 @@ from vagasunb.db import (
     Run,
     Setting,
     Subscription,
+    lock,
     now,
 )
 from vagasunb.demo import seed
@@ -48,6 +54,7 @@ def create_app(settings=None):
     vault = Vault(cfg.secrets)
     started = time.monotonic()
     login_attempts = deque(maxlen=50)
+    nonce_key = secrets.token_bytes(32)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -73,16 +80,48 @@ def create_app(settings=None):
         allowed_hosts=[cfg.host.split(":")[0], "localhost", "127.0.0.1", "testserver"],
     )
     templates = Jinja2Templates(directory=ASSETS / "templates")
+    from vagasunb.presentation import COUNT_HELP, LABELS, date_br, duration, input_date, label
+    from vagasunb.schedule import state
+
+    templates.env.filters.update(
+        brdate=date_br, duration=duration, inputdate=input_date, label=label
+    )
+    templates.env.globals.update(labels=LABELS, count_help=COUNT_HELP)
     app.mount("/assets", StaticFiles(directory=ASSETS / "assets"), name="assets")
+
+    @app.exception_handler(Exception)
+    async def sanitized_failure(request, error):
+        import logging
+        from vagasunb.operations import error_code
+
+        code = error_code(error)
+        logging.getLogger("vagasunb").error("category=http code=%s", code)
+        return JSONResponse(
+            {
+                "detail": "Falha operacional. Consulte o estado e os registros sanitizados.",
+                "code": code,
+            },
+            status_code=503 if code == "database_unavailable" else 500,
+        )
 
     @app.middleware("http")
     async def headers(request, call_next):
+        if (
+            request.method == "GET"
+            and request.url.hostname == "localhost"
+            and cfg.host.startswith("127.0.0.1")
+        ):
+            return RedirectResponse(
+                f"{'https' if cfg.secure else 'http'}://{cfg.host}{request.url.path}"
+                + (f"?{request.url.query}" if request.url.query else ""),
+                status_code=307,
+            )
         response = await call_next(request)
         response.headers.update(
             {
                 "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",
-                "Referrer-Policy": "no-referrer",
+                "Referrer-Policy": "same-origin",
                 "X-Frame-Options": "DENY",
                 "Content-Security-Policy": "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self'",
             }
@@ -98,9 +137,105 @@ def create_app(settings=None):
             return session
 
     def check_origin(request):
-        origin = request.headers.get("origin")
-        if origin != str(request.base_url).rstrip("/"):
+        def normalized(value):
+            try:
+                u = urlsplit(value)
+                if (
+                    u.scheme not in {"http", "https"}
+                    or not u.hostname
+                    or u.username
+                    or u.path not in {"", "/"}
+                    or u.query
+                    or u.fragment
+                ):
+                    return None
+                return u.scheme, u.hostname.lower(), u.port or (443 if u.scheme == "https" else 80)
+            except ValueError:
+                return None
+
+        expected = normalized(f"{'https' if cfg.secure else 'http'}://{cfg.host}")
+        if (
+            normalized(request.headers.get("origin", "")) != expected
+            or normalized(str(request.base_url)) != expected
+        ):
             raise HTTPException(403, "Origem inválida")
+
+    def auth_page(request, kind="login", error="", status=200):
+        token = secrets.token_urlsafe(32)
+        response = templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={"nonce": token, "error": error, "kind": kind},
+            status_code=status,
+        )
+        signature = hmac.new(nonce_key, token.encode(), hashlib.sha256).hexdigest()
+        response.set_cookie(
+            "login_nonce",
+            token + "." + signature,
+            httponly=True,
+            samesite="strict",
+            secure=cfg.secure,
+            max_age=600,
+        )
+        return response
+
+    async def auth_form(request):
+        check_origin(request)
+        form = await request.form()
+        cookie = request.cookies.get("login_nonce", "")
+        nonce, _, signature = cookie.partition(".")
+        expected = hmac.new(nonce_key, nonce.encode(), hashlib.sha256).hexdigest()
+        if (
+            not nonce
+            or not secrets.compare_digest(nonce, str(form.get("nonce", "")))
+            or not secrets.compare_digest(signature, expected)
+        ):
+            raise HTTPException(403, "Formulário expirado. Tente novamente.")
+        return form
+
+    def validate_password(form):
+        password = str(form.get("password", ""))
+        if not 12 <= len(password) <= 256:
+            raise ValueError("Use uma senha entre 12 e 256 caracteres.")
+        if password != form.get("confirm"):
+            raise ValueError("A confirmação da senha não confere.")
+        return password
+
+    @app.get("/setup", response_class=HTMLResponse)
+    async def setup_page(request: Request):
+        async with db.transaction() as s:
+            if await s.get(Admin, 1):
+                return RedirectResponse("/login", status_code=303)
+        if cfg.host.split(":")[0] not in {"127.0.0.1", "localhost", "testserver"} and not (
+            cfg.secure and os.getenv("VAGAS_PRIVATE_ACCESS") == "1"
+        ):
+            raise HTTPException(403, "Cadastro inicial exige acesso local ou privado protegido.")
+        return auth_page(request, "setup")
+
+    @app.post("/setup", response_class=HTMLResponse)
+    async def setup(request: Request):
+        try:
+            form = await auth_form(request)
+            password = validate_password(form)
+            hashed = await asyncio.to_thread(PasswordHasher().hash, password)
+            async with db.transaction() as s:
+                await lock(s, "admin", "credential")
+                if await s.get(Admin, 1):
+                    return RedirectResponse("/login", status_code=303)
+                if cfg.host.split(":")[0] not in {"127.0.0.1", "localhost", "testserver"} and not (
+                    cfg.secure and os.getenv("VAGAS_PRIVATE_ACCESS") == "1"
+                ):
+                    raise HTTPException(403, "Use acesso local ou privado protegido.")
+                s.add(Admin(id=1, password=hashed))
+                s.add(Event(category="admin", code="web_setup_completed", values={}))
+            return RedirectResponse("/login", status_code=303)
+        except (ValueError, HTTPException) as exc:
+            return auth_page(
+                request,
+                "setup",
+                str(exc) if isinstance(exc, ValueError) else exc.detail,
+                exc.status_code if isinstance(exc, HTTPException) else 400,
+            )
 
     async def mutation(request):
         session = await authenticated(request)
@@ -115,42 +250,140 @@ def create_app(settings=None):
         try:
             async with db.transaction() as s:
                 await s.execute(text("SELECT 1"))
-            return {"status": "ok", "component": "admin"}
+                heartbeat = await s.get(Setting, "worker_health")
+            from datetime import datetime
+
+            value = heartbeat.value if heartbeat else {}
+            age = (
+                (now() - datetime.fromisoformat(value["at"])).total_seconds()
+                if value.get("at")
+                else None
+            )
+            alive = age is not None and age < 15
+            return JSONResponse(
+                {
+                    "status": "ok" if alive else "degraded",
+                    "component": "admin",
+                    "service": "vagasunb-extraordinaria",
+                    "instance": cfg.instance,
+                    "pid": os.getpid(),
+                    "database": "ok",
+                    "worker": {
+                        "alive": alive,
+                        "tasks_healthy": alive
+                        and value.get("collect")
+                        in {"ok", "running", "paused", "scheduled", "manual", "waiting"}
+                        and value.get("dispatch")
+                        in {"simulated", "disabled", "enabled", "running", "paused", "scheduled"},
+                        "age_s": round(age, 1) if age is not None else None,
+                        **value,
+                    },
+                },
+                status_code=200 if alive else 503,
+            )
         except Exception:
             return JSONResponse({"status": "degraded", "component": "admin"}, status_code=503)
 
+    @app.get("/metrics")
+    async def metrics(request: Request):
+        await authenticated(request)
+        async with db.transaction() as s:
+            worker = await s.get(Setting, "worker_health")
+            ops = await options(s)
+            cycle = await s.get(Setting, "catalog_cycle_" + ops["source"])
+            complete = await s.get(Setting, "catalog_complete_" + ops["source"])
+            states = dict(
+                (await s.execute(select(Outbox.status, func.count()).group_by(Outbox.status))).all()
+            )
+            batches = (
+                await s.execute(
+                    select(
+                        Classroom.code,
+                        Classroom.number,
+                        Outbox.cycle,
+                        func.count(),
+                        func.min(Outbox.sent),
+                        func.max(Outbox.sent),
+                        func.min(Outbox.created),
+                    )
+                    .join(Classroom, Classroom.id == Outbox.classroom_id)
+                    .group_by(Classroom.code, Classroom.number, Outbox.cycle)
+                    .order_by(func.max(Outbox.created).desc())
+                    .limit(8)
+                )
+            ).all()
+            version = await s.scalar(text("SELECT version_num FROM alembic_version"))
+            from vagasunb.services import detection_window
+
+            transition_window = await detection_window(s, ops, ops["period"])
+            return {
+                "cycle": cycle.value
+                if cycle and cycle.value.get("period") == ops["period"]
+                else {"status": "not_started", "period": ops["period"], "source": ops["source"]},
+                "complete": complete.value if complete else {},
+                "source": ops["source"],
+                "gates": {
+                    task: state(ops, task, now()) for task in ("register", "collect", "dispatch")
+                },
+                "worker": worker.value if worker else {"status": "not_started"},
+                "desired_s": ops["interval"],
+                "screen_s": ops["screen_interval"],
+                "outbox": states,
+                "migration": version,
+                "transition_window_s": round(transition_window, 1),
+                "alert_ttl_s": ops["stale"],
+                "sending": {
+                    "pool": ops["send_concurrency"],
+                    "global_per_s": ops["send_rate"],
+                    "chat_interval_s": 1,
+                },
+                "batches": [
+                    {
+                        "code": r[0],
+                        "classroom": r[1],
+                        "cycle": r[2],
+                        "eligible": r[3],
+                        "first": r[4].isoformat() if r[4] else None,
+                        "last": r[5].isoformat() if r[5] else None,
+                        "spread_s": (r[5] - r[4]).total_seconds() if r[4] and r[5] else None,
+                        "first_latency_s": (r[4] - r[6]).total_seconds() if r[4] else None,
+                    }
+                    for r in batches
+                ],
+            }
+
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
-        token = secrets.token_urlsafe(32)
-        response = templates.TemplateResponse(
-            request=request, name="login.html", context={"nonce": token, "error": ""}
-        )
-        response.set_cookie(
-            "login_nonce", token, httponly=True, samesite="strict", secure=cfg.secure, max_age=600
-        )
-        return response
+        async with db.transaction() as s:
+            if not await s.get(Admin, 1):
+                return RedirectResponse("/setup", status_code=303)
+        return auth_page(request)
 
     @app.post("/login")
     async def login(request: Request):
-        check_origin(request)
-        form = await request.form()
-        nonce = request.cookies.get("login_nonce", "")
-        if not nonce or not secrets.compare_digest(nonce, str(form.get("nonce", ""))):
-            raise HTTPException(403, "CSRF inválido")
+        try:
+            form = await auth_form(request)
+        except HTTPException as exc:
+            return auth_page(request, error=exc.detail, status=exc.status_code)
         t = time.monotonic()
         while login_attempts and login_attempts[0] < t - 60:
             login_attempts.popleft()
         if len(login_attempts) >= 8:
-            raise HTTPException(429, "Aguarde um minuto antes de tentar novamente")
+            return auth_page(
+                request, error="Aguarde um minuto antes de tentar novamente.", status=429
+            )
         login_attempts.append(t)
         async with db.transaction() as s:
+            await lock(s, "admin", "credential")
             admin = await s.get(Admin, 1)
             try:
                 if not admin or len(str(form.get("password", ""))) > 256:
                     raise ValueError()
-                PasswordHasher().verify(admin.password, str(form.get("password", "")))
+                await asyncio.to_thread(
+                    PasswordHasher().verify, admin.password, str(form.get("password", ""))
+                )
             except (VerificationError, ValueError):
-                raise HTTPException(401, "Credencial inválida") from None
+                return auth_page(request, error="Senha inválida. Tente novamente.", status=401)
             token = secrets.token_urlsafe(32)
             s.add(
                 AdminSession(
@@ -165,6 +398,30 @@ def create_app(settings=None):
         )
         response.delete_cookie("login_nonce")
         return response
+
+    @app.post("/password")
+    async def change_password(request: Request):
+        form = await mutation(request)
+        try:
+            password = validate_password(form)
+            async with db.transaction() as s:
+                await lock(s, "admin", "credential")
+                admin = await s.get(Admin, 1)
+                await asyncio.to_thread(
+                    PasswordHasher().verify, admin.password, str(form.get("current", ""))[:257]
+                )
+                admin.password = await asyncio.to_thread(PasswordHasher().hash, password)
+                from sqlalchemy import delete
+
+                await s.execute(delete(AdminSession))
+                s.add(Event(category="admin", code="password_changed", values={}))
+            return RedirectResponse("/login", status_code=303)
+        except (ValueError, VerificationError):
+            return auth_page(
+                request,
+                error="Senha atual ou confirmação inválida. A senha não foi alterada.",
+                status=400,
+            )
 
     @app.post("/logout")
     async def logout(request: Request):
@@ -252,11 +509,16 @@ def create_app(settings=None):
                 .mappings()
                 .all()
             )
+            migration = await s.scalar(text("SELECT version_num FROM alembic_version"))
             durations = sorted(r.duration_ms for r in runs)
             process = psutil.Process()
             disk = shutil.disk_usage(cfg.secrets.resolve().parent)
             context = dict(
                 mode=cfg.mode,
+                config_version=digest(json.dumps(ops, sort_keys=True)),
+                gates={
+                    task: state(ops, task, now()) for task in ("register", "collect", "dispatch")
+                },
                 ops=ops,
                 counts=counts,
                 csrf=session.csrf,
@@ -283,6 +545,8 @@ def create_app(settings=None):
                 else None,
                 now=now(),
                 title="Visão geral",
+                migration=migration,
+                catalog_source=ops["source"],
                 series=sorted((series.value if series else {}).items())[-30:],
                 all_count=all_count,
                 selected_count=selected_count,
@@ -294,27 +558,33 @@ def create_app(settings=None):
         form = await mutation(request)
         action = str(form.get("action", ""))
         async with db.transaction() as s:
+            await lock(s, "operations", "config")
             ops = await options(s)
-            if action in {"collect_paused", "dispatch_paused"}:
-                await change_options(s, {action: not ops[action]})
+            if action in {"collect_paused", "dispatch_paused", "registrations_open"}:
+                value = str(form.get("value", str(not ops[action]).lower())) == "true"
+                await change_options(s, {action: value})
             elif action == "cleanup":
                 await cleanup(s)
             elif action == "collect":
-                scope = str(form.get("scope", ""))
-                if scope not in ops["scopes"]:
-                    raise HTTPException(400, "Escopo inválido")
                 await s.merge(
                     Setting(
                         key="collect_request",
-                        value={"scope": scope, "requested": now().isoformat()},
+                        value={"requested": now().isoformat()},
                     )
                 )
             elif action == "config":
+                if form.get("config_version") and not hmac.compare_digest(
+                    str(form["config_version"]), digest(json.dumps(ops, sort_keys=True))
+                ):
+                    raise HTTPException(
+                        409,
+                        "Outra aba alterou as opções. Recarregue antes de salvar; seus valores continuam nesta tela.",
+                    )
                 try:
                     from datetime import datetime
 
-                    period = str(form.get("period", "")).strip()
-                    end = datetime.fromisoformat(str(form.get("window_end", "")))
+                    period = str(form.get("period", ops["period"])).strip()
+                    end = datetime.fromisoformat(str(form.get("window_end", ops["window_end"])))
                     if not period or len(period) > 20 or not end.tzinfo:
                         raise ValueError()
                     values = {
@@ -328,17 +598,59 @@ def create_app(settings=None):
                             "outbox_days",
                             "events_days",
                             "recipient_days",
+                            "send_rate",
+                            "send_concurrency",
+                            "screen_interval",
                         ]
+                        if key in form
                     }
-                    scopes = [
-                        v.strip() for v in str(form.get("scopes", "")).splitlines() if v.strip()
-                    ]
+                    from vagasunb.schedule import local_instant
+
+                    timezone = str(form.get("timezone", ops["timezone"]))
+                    if "timezone" in form:
+                        values["timezone"] = timezone
+                    if "window_end_local" in form:
+                        end = datetime.fromisoformat(
+                            local_instant(str(form["window_end_local"]), timezone)
+                        )
+                    for key in ("collection_auto", "registrations_open"):
+                        if key in form:
+                            if form[key] not in {"true", "false"}:
+                                raise ValueError()
+                            values[key] = form[key] == "true"
+                    if "closed_message" in form:
+                        values["closed_message"] = str(form["closed_message"]).strip()
+                    for task in ("register", "collect", "dispatch"):
+                        key = "schedule_" + task
+                        if key + "_enabled" in form:
+                            values[key] = {
+                                "enabled": form[key + "_enabled"] == "true",
+                                "start": local_instant(str(form.get(key + "_start", "")), timezone),
+                                "end": local_instant(str(form.get(key + "_end", "")), timezone),
+                                "days": [int(v) for v in form.getlist(key + "_days")],
+                                "from": str(form.get(key + "_from", "")),
+                                "to": str(form.get(key + "_to", "")),
+                            }
+                    scopes = (
+                        [v.strip() for v in str(form["scopes"]).splitlines() if v.strip()]
+                        if "scopes" in form
+                        else ops["scopes"]
+                    )
                     if len(scopes) > 250 or any(len(v) > 100 for v in scopes):
                         raise ValueError()
                     if cfg.mode != "demo" and any(not v.isdigit() for v in scopes):
                         raise ValueError()
                     values.update(period=period, window_end=end.isoformat(), scopes=scopes)
-                    if cfg.mode == "demo" and not period.startswith("DEMO"):
+                    source = str(form.get("source", ops["source"]))
+                    if source not in {"demo", "public"}:
+                        raise ValueError()
+                    if source == "public":
+                        import re
+
+                        if not re.fullmatch(r"\d{4}\.\d", period):
+                            raise ValueError()
+                    values["source"] = source
+                    if source == "demo" and not period.startswith("DEMO"):
                         raise ValueError()
                     await change_options(s, values)
                 except (ValueError, KeyError):
@@ -356,7 +668,7 @@ def create_app(settings=None):
                 s.add(Event(category="dispatch", code="retry_requested", values={}))
             else:
                 raise HTTPException(400, "Ação desconhecida")
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/?saved=1#settings", status_code=303)
 
     @app.get("/events.csv")
     async def export_events(request: Request):
@@ -376,13 +688,19 @@ def create_app(settings=None):
         async def demo_page(request: Request):
             session = await authenticated(request)
             async with db.transaction() as s:
+                source = (await options(s))["source"]
                 classes = (
                     await s.scalars(select(Classroom).order_by(Classroom.code, Classroom.number))
                 ).all()
             return templates.TemplateResponse(
                 request=request,
                 name="demo.html",
-                context={"csrf": session.csrf, "classes": classes, "mode": cfg.mode},
+                context={
+                    "csrf": session.csrf,
+                    "classes": classes,
+                    "mode": cfg.mode,
+                    "source": source,
+                },
             )
 
         @app.post("/demo/interact")
@@ -413,6 +731,8 @@ def create_app(settings=None):
             except ValueError:
                 raise HTTPException(400, "Vagas entre 0 e 30") from None
             async with db.transaction() as s:
+                if (await options(s))["source"] != "demo":
+                    raise HTTPException(403, "Alteração de vagas só é permitida na fonte demo.")
                 c = await s.get(Classroom, str(form.get("cid", "")))
                 source = await s.get(Setting, "demo_source")
                 if not c or not source:
@@ -428,17 +748,17 @@ def create_app(settings=None):
 
             await collect_scope(db, DemoSource(db), scope, "demo")
             return {
-                "status": "Observação registrada. Para confirmar abertura, observe novamente após o debounce; o worker também coleta."
+                "status": "Observação registrada. Para confirmar a abertura, observe novamente após o tempo de confirmação; o serviço também segue as atualizações configuradas."
             }
 
         @app.post("/demo/dispatch")
         async def dispatch(request: Request):
             await mutation(request)
-            from vagasunb.monitor import dispatch_once
+            from vagasunb.distribution import dispatch_batch
             from vagasunb.telegram import FakeTransport
 
             transport = FakeTransport()
-            await dispatch_once(db, vault, transport, "demo")
+            await dispatch_batch(db, vault, transport, "demo")
             return {"sent": len(transport.views)}
 
         @app.post("/demo/alerts")

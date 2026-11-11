@@ -38,6 +38,7 @@ class Setting(Base):
 class Recipient(Base):
     __tablename__ = "recipients"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    origin: Mapped[str] = mapped_column(String(16), default="demo", server_default="demo")
     cipher: Mapped[str] = mapped_column(Text)
     lookup: Mapped[str] = mapped_column(String(64), unique=True)
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -185,3 +186,16 @@ async def lock(session, namespace: str, key: str, wait=True):
     return await session.scalar(
         text(f"SELECT {function}(hashtextextended(:key, 0))"), {"key": namespace + ":" + key}
     )
+
+
+async def release_session_lock(connection, key):
+    """Never return a session-locked or aborted connection to the pool."""
+    try:
+        await connection.rollback()
+        await connection.execute(
+            text("SELECT pg_advisory_unlock(hashtextextended(:key,0))"), {"key": key}
+        )
+        await connection.commit()
+    except BaseException:
+        await connection.invalidate()
+        raise

@@ -1,4 +1,3 @@
-import difflib
 import re
 import unicodedata
 
@@ -20,51 +19,51 @@ def code_key(value):
 
 
 async def search(session, query, period, page=0, campus=None, unit=None, vacancies=False):
-    if len(query) > 120 or page < 0 or page > 10000:
+    from sqlalchemy import and_, case, func, or_, cast
+    from sqlalchemy.dialects.postgresql import JSONB
+
+    if len(query) > 120 or not 0 <= page <= 10000:
         raise ValueError("Busca deve ter até 120 caracteres")
-    stmt = select(Classroom).where(Classroom.period == period)
+    filters = [Classroom.period == period]
     if campus:
-        stmt = (
-            stmt.where(Classroom.campus == campus)
-            if campus != "?"
-            else stmt.where(Classroom.campus.is_(None))
-        )
+        filters.append(Classroom.campus == campus if campus != "?" else Classroom.campus.is_(None))
     if vacancies:
-        stmt = stmt.where(Classroom.available > 0)
-    # Bounded catalog; ranking is accent-insensitive and code-preserving. No remote queries.
-    rows = list((await session.scalars(stmt.order_by(Classroom.code, Classroom.number))).all())
+        filters.extend([Classroom.available > 0, Classroom.missing == 0])
     if unit:
-        rows = [c for c in rows if unit in c.units]
+        filters.append(cast(Classroom.units, JSONB).contains([unit]))
     q = normalize(query)
-    parts = q.split()
-    ranked = []
-    for c in rows:
-        ck = code_key(c.code)
-        rank = None
-        if not q:
-            rank = 4
-        elif q == normalize(c.name) or code_key(q) == ck:
-            rank = 0
-        elif (
-            len(parts) == 2
-            and code_key(parts[0]) == ck
-            and parts[1].isdigit()
-            and c.number.isdigit()
-            and int(parts[1]) == int(c.number)
-        ):
-            rank = 1
-        elif ck.startswith(code_key(q)):
-            rank = 2
-        elif all(p in c.search for p in parts):
-            rank = 3
-        if rank is not None:
-            ranked.append((rank, c.code, c.number, c))
-    approximate = False
-    if not ranked and q:
-        choices = difflib.get_close_matches(
-            q, sorted({normalize(c.name) for c in rows}), n=3, cutoff=0.65
+    code = func.regexp_replace(func.lower(Classroom.code), r"([a-z]+)0+([0-9])", r"\1\2", "g")
+    rank = 4
+    if q:
+        exact = or_(code == code_key(q), Classroom.search == q)
+        parts = q.split()
+        pair = (
+            and_(
+                code == code_key(parts[0]),
+                func.ltrim(func.lower(Classroom.number), "0") == parts[1].lstrip("0"),
+            )
+            if len(parts) == 2
+            else False
         )
-        ranked = [(5, c.code, c.number, c) for c in rows if normalize(c.name) in choices]
-        approximate = bool(ranked)
-    ranked.sort(key=lambda x: x[:3])
-    return [r[3] for r in ranked[page * 6 : (page + 1) * 6]], len(ranked), approximate
+        prefix = code.startswith(code_key(q), autoescape=True)
+        terms = and_(*(Classroom.search.contains(p, autoescape=True) for p in parts))
+        filters.append(or_(exact, pair, prefix, terms))
+        rank = case((exact, 0), (pair, 1), (prefix, 2), else_=3)
+    stmt = select(Classroom).where(*filters)
+    total = await session.scalar(select(func.count()).select_from(stmt.subquery()))
+    approximate = False
+    if not total and q:
+        filters = filters[:-1] + [func.similarity(Classroom.search, q) >= 0.3]
+        stmt = select(Classroom).where(*filters)
+        total = await session.scalar(select(func.count()).select_from(stmt.subquery()))
+        rank = -func.similarity(Classroom.search, q)
+        approximate = bool(total)
+    order = [rank] if not isinstance(rank, int) else []
+    rows = (
+        await session.scalars(
+            stmt.order_by(*order, Classroom.code, Classroom.number, Classroom.id)
+            .offset(page * 6)
+            .limit(6)
+        )
+    ).all()
+    return list(rows), total, approximate
