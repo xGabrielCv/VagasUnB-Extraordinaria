@@ -1,0 +1,88 @@
+name: vagasunb-extraordinaria-demo
+x-app: &app
+  image: vagasunb-extraordinaria:local
+  build: .
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 35s
+  mem_limit: ${APP_MEMORY:-384m}
+  cpus: ${APP_CPUS:-1.0}
+  user: "${APP_UID:-10001}:${APP_GID:-10001}"
+  environment: &env
+    VAGAS_MODE: demo
+    VAGAS_SECRETS: /run/secrets
+    VAGAS_HOST: 127.0.0.1:8765
+    PGHOST: postgres
+    PGPASSWORD_FILE: /run/secrets/postgres_password
+    VAGAS_HEARTBEAT_DIR: /tmp
+  secrets: [keys.json, postgres_password]
+  networks: [internal]
+  logging:
+    driver: json-file
+    options: {max-size: 5m, max-file: "4"}
+services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vagas
+      POSTGRES_DB: vagas_demo
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [demo_postgres:/var/lib/postgresql/data]
+    networks: [internal]
+    mem_limit: ${DB_MEMORY:-512m}
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U vagas -d vagas_demo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "4"}
+  migrate:
+    <<: *app
+    restart: "no"
+    command: [alembic, upgrade, head]
+    depends_on:
+      postgres: {condition: service_healthy}
+  admin:
+    <<: *app
+    ports: ["127.0.0.1:8765:8765"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  worker:
+    <<: *app
+    command: [python, -m, vagasunb.cli, worker]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import pathlib,time; p=pathlib.Path('/tmp/worker.heartbeat'); assert p.exists() and time.time()-float(p.read_text())<30"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  bot:
+    <<: *app
+    profiles: [telegram-future]
+    command: [python, -m, vagasunb.cli, bot]
+    # Demo mode deliberately refuses this process. Future real instance needs a separate
+    # database/project and explicit mode, enable flag, token mount, and outbound network.
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import pathlib,time; p=pathlib.Path('/tmp/bot.heartbeat'); assert p.exists() and time.time()-float(p.read_text())<30"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+secrets:
+  keys.json: {file: ./.private/secrets/keys.json}
+  postgres_password: {file: ./.private/secrets/postgres_password}
+volumes:
+  demo_postgres:
+networks:
+  internal: {internal: true}

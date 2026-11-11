@@ -1,0 +1,77 @@
+# Explicit future public collection instance. Not started by demo scripts.
+name: vagasunb-extraordinaria-public
+x-public: &public
+  build: .
+  image: vagasunb-extraordinaria:local
+  user: "${APP_UID:-10001}:${APP_GID:-10001}"
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 35s
+  mem_limit: 384m
+  environment:
+    VAGAS_MODE: public
+    VAGAS_SECRETS: /run/secrets
+    VAGAS_HOST: 127.0.0.1:8766
+    VAGAS_HEARTBEAT_DIR: /tmp
+    PGHOST: postgres
+    PGPASSWORD_FILE: /run/secrets/postgres_password
+  secrets: [keys.json, postgres_password]
+  logging:
+    driver: json-file
+    options: {max-size: 5m, max-file: "4"}
+services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vagas
+      POSTGRES_DB: vagas_public
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [public_postgres:/var/lib/postgresql/data]
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U vagas -d vagas_public"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "4"}
+  migrate:
+    <<: *public
+    restart: "no"
+    command: [alembic, upgrade, head]
+    networks: [database]
+    depends_on:
+      postgres: {condition: service_healthy}
+  admin:
+    <<: *public
+    ports: ["127.0.0.1:8766:8765"]
+    networks: [database]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  worker:
+    <<: *public
+    command: [python, -m, vagasunb.cli, worker]
+    networks: [database, outgoing]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import pathlib,time; p=pathlib.Path('/tmp/worker.heartbeat'); assert p.exists() and time.time()-float(p.read_text())<30"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+secrets:
+  keys.json: {file: ./.private/public/secrets/keys.json}
+  postgres_password: {file: ./.private/public/secrets/postgres_password}
+volumes:
+  public_postgres:
+networks:
+  database: {internal: true}
+  outgoing:

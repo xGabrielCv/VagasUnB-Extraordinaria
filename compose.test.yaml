@@ -1,0 +1,30 @@
+name: vagasunb-extraordinaria-test
+services:
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: vagas
+      POSTGRES_DB: vagas_demo
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    tmpfs: [/var/lib/postgresql/data]
+    networks: [isolated]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U vagas -d vagas_demo"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  tests:
+    build: {context: ., target: tests}
+    environment:
+      VAGAS_MODE: demo
+      PGHOST: postgres
+      PGPASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    networks: [isolated]
+    depends_on:
+      postgres: {condition: service_healthy}
+secrets:
+  postgres_password: {file: ./.private/secrets/postgres_password}
+networks:
+  isolated: {internal: true}

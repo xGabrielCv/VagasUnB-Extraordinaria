@@ -1,0 +1,28 @@
+[project]
+name = "vagasunb-extraordinaria"
+version = "0.1.0"
+description = "Catálogo público e monitoramento independente, com demonstração offline"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "fastapi>=0.115,<1", "uvicorn>=0.34,<1", "jinja2>=3.1.6,<4",
+  "python-multipart>=0.0.20,<1", "sqlalchemy[asyncio]>=2.0.40,<2.1",
+  "psycopg[binary]>=3.2.6,<4", "alembic>=1.15,<2", "httpx>=0.28,<0.29",
+  "beautifulsoup4>=4.13,<5", "cryptography>=44,<50", "argon2-cffi>=23.1,<26",
+  "python-telegram-bot>=22.5,<23", "psutil>=7,<8"
+]
+[dependency-groups]
+dev = ["pytest>=8.3,<10", "pytest-asyncio>=0.26,<2", "ruff>=0.11,<1", "pytest-socket>=0.7,<1", "pyyaml>=6,<7"]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[tool.hatch.build.targets.wheel]
+packages = ["src/vagasunb"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
