@@ -126,6 +126,9 @@ async def command(args):
                 await verify_instance(s, Vault(cfg.secrets), cfg.mode)
 
                 ops = await options(s)
+                token_file = cfg.secrets / "telegram_token"
+                has_token = token_file.exists() and bool(token_file.read_text().strip())
+                tg_enabled = cfg.mode == "public" and os.getenv("VAGAS_TELEGRAM_ENABLE") == "1"
                 print(
                     json.dumps(
                         {
@@ -133,9 +136,11 @@ async def command(args):
                             "database": "PostgreSQL",
                             "quarantine": ops["quarantine"],
                             "keys": "valid",
-                            "telegram": "disabled"
-                            if cfg.mode != "telegram"
-                            else "requires explicit enable",
+                            "telegram": (
+                                "enabled"
+                                if tg_enabled and has_token
+                                else ("requires token" if tg_enabled else "disabled")
+                            ),
                         }
                     )
                 )

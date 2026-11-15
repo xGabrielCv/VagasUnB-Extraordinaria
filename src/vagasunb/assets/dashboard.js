@@ -2,7 +2,8 @@ const labels=JSON.parse(document.getElementById('presentation').textContent);
 const label=code=>labels[code] ?? 'Estado não reconhecido; consulte o diagnóstico';
 const number=n=>Number(n).toLocaleString('pt-BR',{maximumFractionDigits:2});
 const duration=n=>n==null?'Ainda não medido':`${Math.floor(n/3600)?Math.floor(n/3600)+' h ':''}${Math.floor(n%3600/60)?Math.floor(n%3600/60)+' min ':''}${Math.round(n%60)} s`;
-const date=value=>value?new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',dateStyle:'short',timeStyle:'medium'}).format(new Date(value)):'Ainda não houve atualização';
+let metricTz='America/Sao_Paulo';
+const date=(value,tz=metricTz)=>value?new Intl.DateTimeFormat('pt-BR',{timeZone:tz,dateStyle:'short',timeStyle:'medium'}).format(new Date(value)):'Ainda não houve atualização';
 function age(value){if(!value)return 'Ainda não houve sinal';const n=(Date.now()-Date.parse(value))/1000;return n< -5?'Relógio inconsistente':`há ${duration(Math.max(0,n))}`;}
 let refreshing=false, screenSeconds=3, screenTimer;
 async function refreshMetrics(){
@@ -14,11 +15,17 @@ async function refreshMetrics(){
     if(response.status===401){location.assign('/login');return;}
     if(!response.ok)throw new Error();
     const data=await response.json(),c=data.cycle,w=data.worker;
+    if(data.timezone)metricTz=data.timezone;
     if(data.screen_s!==screenSeconds){screenSeconds=data.screen_s;clearInterval(screenTimer);screenTimer=setInterval(refreshMetrics,screenSeconds*1000);}
     const alive=w.at && Date.now()-Date.parse(w.at)<15000;
-    put('situation',`${alive?'Serviço respondendo':'Sem sinal recente do serviço'} · ${label(data.source)} · Atualizações: ${label(w.collect)} · ${label(data.gates.collect.reason)} · Telegram ainda não conectado`);
-    put('live-coverage',c.expected?`${number(c.valid??0)} / ${number(c.expected)}`:'Aguardando descoberta');
-    put('live-status',`${label(c.status)} · ${number(c.empty??0)} consultas vazias · ${number(c.failed??0)} falhas`);
+    const botAlive=data.bot?.at && Date.now()-Date.parse(data.bot.at)<20000;
+    const tgText=!data.telegram_enabled?(data.telegram_token?'Token salvo · Telegram aguardando ativação':'Telegram ainda não conectado'):(botAlive?'Telegram conectado e respondendo':(data.telegram_token?'Telegram habilitado (bot iniciando)':'Telegram sem token'));
+    put('tg-pill',tgText);
+    put('situation',`${alive?'Serviço respondendo':'Sem sinal recente do serviço'} · ${label(data.source)} · Atualizações: ${label(w.collect)} · ${label(data.gates.collect.reason)} · ${tgText}`);
+    const pct=c.expected?Math.min(100,Math.round(((c.processed??c.valid??0)/c.expected)*100)):0;
+    const bar=document.getElementById('live-progress');if(bar)bar.style.width=`${pct}%`;
+    put('live-coverage',c.expected?`${number(c.valid??0)} / ${number(c.expected)} (${pct}%)`:'Aguardando descoberta');
+    put('live-status',`${label(c.status)}${c.current?` (${c.current})`:''} · ${number(c.empty??0)} consultas vazias · ${number(c.failed??0)} falhas`);
     put('live-interval',`${duration(data.desired_s)} / ${duration(c.effective_s)}`);
     put('live-next',w.collect==='running'?'Atualização em andamento':data.gates.collect.reason!=='ok'?label(data.gates.collect.reason):w.collect==='manual'?'Aguardando atualização manual':`Próxima tentativa em ${duration(w.next_attempt_s)} · Pausa automática: ${duration(w.backoff_s)}`);
     put('live-duration',duration(c.duration_s));

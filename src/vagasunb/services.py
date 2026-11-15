@@ -39,6 +39,7 @@ DEFAULTS = {
     "dispatch_paused": False,
     "quarantine": False,
     "scopes": [],
+    "levels": [],
     "limit": 10,
     "outbox_days": 7,
     "events_days": 30,
@@ -117,6 +118,16 @@ async def change_options(s, values):
             raise ValueError("Valor fora do limite")
         if key == "source" and value not in {"demo", "public"}:
             raise ValueError("Fonte inválida")
+        if key == "levels":
+            if (
+                not isinstance(value, list)
+                or len(value) > 20
+                or any(
+                    not isinstance(v, str) or not v.isalnum() or len(v) > 20
+                    for v in value
+                )
+            ):
+                raise ValueError("Níveis inválidos")
         if key in {"send_rate", "send_concurrency"} and (
             type(value) is not int or not 1 <= value <= (29 if key == "send_rate" else 12)
         ):

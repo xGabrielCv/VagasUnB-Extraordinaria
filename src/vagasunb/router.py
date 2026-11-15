@@ -97,7 +97,9 @@ async def route(
     if len(text) > 120:
         return View("Entrada limitada a 120 caracteres.")
     r = await s.scalar(select(Recipient).where(Recipient.lookup == vault.index(chat_id)))
-    if text == "/start":
+    cmd_part, _, rest = text.strip().partition(" ")
+    cmd = cmd_part.split("@", 1)[0].lower() if cmd_part.startswith("/") else ""
+    if cmd == "/start":
         r = await register(s, vault, chat_id, synthetic=synthetic)
     if not r:
         return View("Seus dados não estão cadastrados. Envie /start para iniciar conscientemente.")
@@ -113,18 +115,21 @@ async def route(
             return View("⌛ Este menu expirou. Envie /menu.")
         action, args = cb.action, cb.args
         await s.delete(cb)  # All callbacks single-use, including sensitive confirmations.
-    elif text.startswith("/"):
-        action = {
-            "/start": "home",
-            "/menu": "home",
-            "/buscar": "search",
-            "/catalogo": "campus",
-            "/minhas": "subscriptions",
-            "/status": "status",
-            "/ajuda": "about",
-            "/privacidade": "privacy",
-            "/apagar_dados": "delete",
-        }.get(text, "home")
+    elif cmd:
+        if cmd == "/buscar" and rest.strip():
+            action, args = "results", {"query": rest.strip()}
+        else:
+            action = {
+                "/start": "home",
+                "/menu": "home",
+                "/buscar": "search",
+                "/catalogo": "campus",
+                "/minhas": "subscriptions",
+                "/status": "status",
+                "/ajuda": "about",
+                "/privacidade": "privacy",
+                "/apagar_dados": "delete",
+            }.get(cmd, "home")
     elif text.strip():
         action, args = "results", {"query": text.strip()}
     rid = r.id
@@ -141,8 +146,9 @@ async def route(
         subs = list(
             (await s.scalars(select(Subscription).where(Subscription.recipient_id == rid))).all()
         )
+        paused_note = " (alertas pausados)" if r.paused else ""
         return View(
-            f"🎓 <b>VagasUnB (Extraordinária)</b>\n\nMonitoramentos: {len(subs)}/10\nPeríodo: {escape(cfg['period'])}\nAs vagas podem mudar; consulte a última observação.\n\nPor onde vamos começar?",
+            f"🎓 <b>VagasUnB (Extraordinária)</b>\n\nMonitoramentos: {len(subs)}/10{paused_note}\nPeríodo: {escape(cfg['period'])}\nAs vagas podem mudar; consulte a última observação.\n\nPor onde vamos começar?",
             [
                 await b(label, act)
                 for label, act in [
@@ -155,8 +161,13 @@ async def route(
             ],
         )
     if action in {"search", "vacancies"}:
+        example = (
+            "Exemplo sintético: DEMO0001 01."
+            if cfg["source"] == "demo"
+            else "Exemplo: CIC0004 ou Cálculo 1."
+        )
         return await finish(
-            "🔎 <b>Buscar disciplina</b>\n\nDigite código, nome ou código + turma. Exemplo sintético: DEMO0001 01.\nA busca usa somente o catálogo local; não ativa monitoramento.",
+            f"🔎 <b>Buscar disciplina</b>\n\nDigite código, nome ou código + turma. {example}\nA busca usa somente o catálogo local; não ativa monitoramento.",
             [
                 await b("Explorar catálogo", "campus"),
                 await b("Turmas com vagas", "results", vacancies=True),
@@ -213,9 +224,12 @@ async def route(
             unit=args.get("unit"),
             vacancies=args.get("vacancies", False),
         )
-        buttons = [
-            await b(f"{c.code} · {c.name[:35]} · {c.number}", "details", cid=c.id) for c in rows
-        ]
+        def _label(c):
+            avail = c.available
+            tag = "sem vagas" if avail == 0 else ("?" if avail is None else f"{avail}v")
+            return f"{c.code} · {c.name[:30]} · {c.number} ({tag})"
+
+        buttons = [await b(_label(c), "details", cid=c.id) for c in rows]
         if not q and total > (args.get("page", 0) + 1) * 6:
             buttons.append(
                 await b("Próxima página", "results", **{**args, "page": args.get("page", 0) + 1})

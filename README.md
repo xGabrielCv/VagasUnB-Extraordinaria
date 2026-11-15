@@ -52,10 +52,31 @@ Sem Docker, com binários PostgreSQL 17 já disponíveis:
 | Reiniciar | `.\scripts\restart.ps1` |
 | Ver estado | `.\scripts\status.ps1` |
 | Abrir painel | `.\scripts\open-dashboard.ps1` |
+| Configurar DBeaver local | `.\scripts\configure-dbeaver.ps1` |
 | Testar | `.\scripts\test.ps1` |
 
 **Reiniciar preserva banco, configurações e chaves.** Use `-NoBrowser` para não abrir uma aba.
-No Linux: `sh scripts/linux.sh setup`, `start`, `status` ou `stop`.
+No Linux local: `sh scripts/linux.sh setup`, `start`, `status` ou `stop`.
+
+## 🌐 Subir em VPS (Docker + Telegram)
+
+Para produção em VPS usando `compose.public.yaml` (PostgreSQL isolado + painel em `127.0.0.1:8766` + worker + bot):
+
+```sh
+sh scripts/linux.sh setup-public
+sh scripts/linux.sh start-public
+```
+
+No painel (`http://127.0.0.1:8766`, via túnel SSH na VPS), cadastre a senha administrativa, escolha **Catálogo público SIGAA**, informe o período (ex.: `2026.2`) e salve.
+Quando o bot no `@BotFather` estiver criado, conecte com um comando:
+
+```sh
+sh scripts/linux.sh telegram
+```
+
+Informe o token: ele é salvo apenas em `.private/public/secrets/telegram_token` (`chmod 600`), ativa `VAGAS_TELEGRAM_ENABLE=1` e sobe os containers `worker` e `bot`.
+
+No painel administrativo (`/db`), há integração com o **CloudBeaver Community** protegido por autenticação adicional para visualizar e consultar o PostgreSQL pela web tanto localmente (em Docker) quanto na VPS. No Windows nativo, use `.\scripts\configure-dbeaver.ps1 -Open` para conectar com o **DBeaver Community**.
 
 ## 🧪 Demo ou catálogo público
 

@@ -129,3 +129,31 @@ async def test_discovery_does_not_truncate_units():
         assert len((await source.discover())["units"]) == 400
     finally:
         await source.aclose()
+
+
+def test_schedule_strips_popup_tooltip():
+    html = RESULT.replace(
+        "<td>24M12</td>",
+        '<td>24M12 (10/08/2026 - 14/12/2026)<span class="popUp">Segunda-feira 10:00</span></td>',
+    )
+    rows = parse_results(html, "11", "2040.1")
+    assert rows[0]["schedule"] == "24M12 (10/08/2026 - 14/12/2026)"
+
+
+def test_placeholder_subrow_merges_without_identity_conflict():
+    extra = (
+        '<tr class="linhaImpar"><td>01</td><td>2040.1</td><td>A DEFINIR DOCENTE</td>'
+        "<td>6T23</td><td></td><td></td><td>0</td><td></td></tr>"
+    )
+    html = RESULT.replace("</table>", extra + "</table>")
+    rows = parse_results(html, "11", "2040.1")
+    assert len(rows) == 1
+    assert rows[0]["offered"] == 30 and rows[0]["occupied"] == 29
+    assert rows[0]["teachers"] == "Docente sintético"
+
+    conflict = RESULT.replace(
+        "</table>",
+        '<tr class="linhaImpar"><td>01</td><td>2040.1</td><td>Outro</td><td>24M12</td><td></td><td>20</td><td>10</td><td>Sala 2</td></tr></table>',
+    )
+    with pytest.raises(SourceError, match="identity_conflict"):
+        parse_results(conflict, "11", "2040.1")

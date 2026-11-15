@@ -11,7 +11,7 @@ from vagasunb.services import options
 from vagasunb.schedule import allowed
 
 
-async def collect_catalog(db, source, mode, *, max_scopes=None, deadline=1800, period=None):
+async def collect_catalog(db, source, mode, *, max_scopes=None, deadline=5400, period=None):
     started = now()
     clock_start = time.monotonic()
     async with db.engine.connect() as connection:
@@ -63,8 +63,11 @@ async def collect_catalog(db, source, mode, *, max_scopes=None, deadline=1800, p
                 await s.merge(Setting(key="catalog_discovery", value=metadata))
                 await s.merge(Setting(key="catalog_discovery_" + result["source"], value=metadata))
             units = list({u["id"]: u for u in metadata["units"]}.values())
-            levels = list({v["id"]: v for v in metadata["levels"]}.values())
-            scopes = [(u["id"], v["id"]) for u in units for v in levels]
+            all_levels = list({v["id"]: v for v in metadata["levels"]}.values())
+            selected_levels = set(cfg.get("levels") or [])
+            levels = [v for v in all_levels if not selected_levels or v["id"] in selected_levels]
+            levels = sorted(levels, key=lambda v: 0 if v["id"] == "G" else 1)
+            scopes = [(u["id"], v["id"]) for v in levels for u in units]
             result.update(
                 period=cfg["period"],
                 expected=len(scopes),
@@ -192,14 +195,16 @@ async def collect_catalog(db, source, mode, *, max_scopes=None, deadline=1800, p
             result["status"] = "complete" if result["valid"] == len(scopes) else "partial"
             result["unattempted"] = len(scopes) - result["processed"]
             async with db.transaction() as s:
-                levels = {v["id"] for v in metadata["levels"]}
+                active_levels = {v["id"] for v in levels}
                 for c in (
                     await s.scalars(select(Classroom).where(Classroom.period == cfg["period"]))
                 ).all():
                     if (c.code, c.number, c.period) in seen:
                         c.missing = 0
                     elif c.units and all(
-                        (unit, level) in valid_pairs for unit in c.units for level in levels
+                        (unit, level) in valid_pairs
+                        for unit in c.units
+                        for level in active_levels
                     ):
                         c.missing += 1
             result["classrooms_observed"] = len(seen)

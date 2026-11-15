@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Banco de Dados · VagasUnB (Extraordinária)</title>
+<link rel="stylesheet" href="/assets/style.css">
+<body class="demo-shell">
+<header>
+  <div>
+    <span class="eyebrow">ACESSO PROTEGIDO AO BANCO</span>
+    <h1>Banco de dados &amp; CloudBeaver</h1>
+    <p>Camada adicional de autenticação sobre o painel administrativo para consulta ao PostgreSQL.</p>
+  </div>
+  <a class="button secondary" href="/">← Voltar ao painel</a>
+</header>
+
+{% if error %}<p class="notice warning" role="alert">{{ error }}</p>{% endif %}
+{% if saved %}<p class="notice" role="status">Configuração adicional de banco atualizada.</p>{% endif %}
+{% if unlocked_msg %}<p class="notice" role="status">Acesso ao CloudBeaver liberado por 15 minutos.</p>{% endif %}
+
+<section class="grid">
+  <article>
+    <h2>Estado do CloudBeaver Community</h2>
+    {% if cb_online %}
+      <p><span class="pill">Online</span> · Proxy autenticado ativo em <code>/cloudbeaver/</code>.</p>
+    {% else %}
+      <p><span class="pill">Indisponível no momento</span> · Não respondeu em <code>{{ cb_url }}</code>.</p>
+      <p class="muted">Em ambiente Docker/VPS (<code>compose.yaml</code> / <code>compose.public.yaml</code>), o serviço <code>cloudbeaver</code> inicia automaticamente na rede interna, acessível apenas por este proxy.</p>
+    {% endif %}
+    <hr>
+    <h3>Conexão para DBeaver Community (local)</h3>
+    <p class="muted">Sem exibição de senha no painel. Consulte a senha privada em <code>.private/secrets/postgres_password</code>.</p>
+    <ul>
+      <li><b>Host:</b> <code>{{ db_info.host }}</code></li>
+      <li><b>Porta:</b> <code>{{ db_info.port }}</code></li>
+      <li><b>Banco:</b> <code>{{ db_info.database }}</code></li>
+      <li><b>Usuário:</b> <code>{{ db_info.user }}</code></li>
+    </ul>
+  </article>
+
+  <article>
+    <h2>Autenticação adicional (Camada 2)</h2>
+    {% if not configured %}
+      <p>Defina uma senha adicional exclusiva (mínimo 12 caracteres, diferente da senha do painel) para liberar o CloudBeaver Community.</p>
+      <form method="post" action="/db/setup">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Senha adicional do banco (mín. 12 caracteres)
+          <input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password" required>
+        </label>
+        <label>Confirme a senha adicional
+          <input type="password" name="confirm" minlength="12" maxlength="256" autocomplete="new-password" required>
+        </label>
+        <button>Definir senha e liberar</button>
+      </form>
+    {% elif not unlocked %}
+      <p>Sua sessão do painel está autenticada. Informe a senha adicional para liberar <code>/cloudbeaver/</code> por 15 minutos.</p>
+      <form method="post" action="/db/unlock">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Senha adicional do banco
+          <input type="password" name="password" maxlength="256" autocomplete="current-password" required>
+        </label>
+        <button>Desbloquear CloudBeaver</button>
+      </form>
+    {% else %}
+      <p><span class="pill">Desbloqueado</span> · Tempo restante desta janela: <b>{{ (remaining_s // 60) + 1 }} min</b>.</p>
+      <div class="inline">
+        {% if cb_online %}
+          <a class="button" href="/cloudbeaver/" target="_blank" rel="noopener noreferrer">Abrir CloudBeaver Community →</a>
+        {% else %}
+          <a class="button secondary" href="/cloudbeaver/" target="_blank" rel="noopener noreferrer">Tentar abrir /cloudbeaver/</a>
+        {% endif %}
+        <form method="post" action="/db/lock">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="secondary">Bloquear acesso agora</button>
+        </form>
+      </div>
+      <details>
+        <summary>Alterar senha adicional do banco</summary>
+        <form method="post" action="/db/password">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label>Senha adicional atual
+            <input type="password" name="current" maxlength="256" autocomplete="current-password" required>
+          </label>
+          <label>Nova senha adicional (mín. 12 caracteres)
+            <input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password" required>
+          </label>
+          <label>Confirmar nova senha
+            <input type="password" name="confirm" minlength="12" maxlength="256" autocomplete="new-password" required>
+          </label>
+          <button class="secondary">Atualizar senha adicional</button>
+        </form>
+      </details>
+    {% endif %}
+  </article>
+</section>
+</body>
+</html>

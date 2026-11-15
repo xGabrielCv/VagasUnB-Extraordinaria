@@ -31,15 +31,16 @@ async def run(settings=None):
     demo, public = DemoSource(db), PublicSource()
     fake = FakeTransport(record=False)
     budget = SendBudget(db)
-    last_start = 0.0
+    last_start = -1e9
     real_bot = None
     if cfg.mode == "public" and os.getenv("VAGAS_TELEGRAM_ENABLE") == "1":
         from telegram import Bot
         from vagasunb.telegram import BudgetRequest, TelegramTransport
 
-        real_bot = Bot(
-            (cfg.secrets / "telegram_token").read_text().strip(), request=BudgetRequest(db, vault)
-        )
+        token = (cfg.secrets / "telegram_token").read_text().strip()
+        if not token:
+            raise RuntimeError("telegram_token vazio")
+        real_bot = Bot(token, request=BudgetRequest(db, vault))
         await real_bot.initialize()
         transport = TelegramTransport(real_bot)
     else:

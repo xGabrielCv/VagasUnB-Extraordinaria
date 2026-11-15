@@ -25,6 +25,24 @@ class SourceError(Exception):
         super().__init__(code)
 
 
+def _merge_duplicate_row(prev, data):
+    """Merge a SIGAA placeholder sub-row (offered is None) with its primary row."""
+    if prev == data:
+        return prev
+    if prev["source_id"] and data["source_id"] and prev["source_id"] != data["source_id"]:
+        raise SourceError("identity_conflict")
+    if prev["offered"] is not None and data["offered"] is not None:
+        raise SourceError("identity_conflict")
+    primary, extra = (prev, data) if prev["offered"] is not None else (data, prev)
+    if primary["offered"] is None:
+        raise SourceError("identity_conflict")
+    merged = dict(primary)
+    for field in ("source_id", "teachers", "schedule", "location"):
+        if not merged[field] and extra[field]:
+            merged[field] = extra[field]
+    return merged
+
+
 def parse_results(html, unit, period):
     soup = html if isinstance(html, BeautifulSoup) else BeautifulSoup(html, "html.parser")
     errors = [normalize(x.get_text(" ", strip=True)) for x in soup.select("ul.erros li")]
@@ -56,6 +74,15 @@ def parse_results(html, unit, period):
             if not code or len(cells) != 8:
                 raise SourceError("malformed_row")
             fields = [c.get_text(" ", strip=True) for c in cells]
+            schedule = re.sub(
+                r"\s+",
+                " ",
+                " ".join(
+                    s.strip()
+                    for s in cells[3].strings
+                    if not s.find_parent(class_="popUp") and s.strip()
+                ),
+            ).strip()
             if fields[1] != period or not fields[0]:
                 raise SourceError("period_mismatch")
             offered = int(fields[5]) if fields[5].isdigit() else None
@@ -70,16 +97,17 @@ def parse_results(html, unit, period):
                 period=period,
                 units=[unit],
                 teachers=re.sub(r"\s*\(\d+h\)", "", fields[2]) or None,
-                schedule=fields[3] or None,
+                schedule=schedule or None,
                 location=fields[7] or None,
                 offered=offered,
                 occupied=occupied,
                 campus=None,
             )
             key = (code, fields[0], period)
-            if key in found and found[key] != data:
-                raise SourceError("identity_conflict")
-            found[key] = data
+            if key in found:
+                found[key] = _merge_duplicate_row(found[key], data)
+            else:
+                found[key] = data
     if not found:
         raise SourceError("unconfirmed_empty")
     return list(found.values())
@@ -153,6 +181,8 @@ class PublicSource:
             if item.name == "select":
                 selected = item.select_one("option[selected]") or item.select_one("option")
                 payload[item["name"]] = selected.get("value", "") if selected else ""
+            elif item.get("type") in {"checkbox", "radio"} and not item.has_attr("checked"):
+                continue
             elif item.get("type") != "submit":
                 payload[item["name"]] = item.get("value", "")
         required = {

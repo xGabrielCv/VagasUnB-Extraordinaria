@@ -210,9 +210,11 @@ def run_bot(settings):
 
     if settings.mode != "public" or os.getenv("VAGAS_TELEGRAM_ENABLE") != "1":
         raise RuntimeError(
-            "Telegram exige modo telegram e habilitação explícita; token sozinho não ativa"
+            "Telegram exige modo public/telegram e VAGAS_TELEGRAM_ENABLE=1; token sozinho não ativa"
         )
     token = (settings.secrets / "telegram_token").read_text().strip()
+    if not token:
+        raise RuntimeError("telegram_token vazio")
     db, vault = Database(settings.database_url), Vault(settings.secrets)
     state = {}
 
@@ -233,11 +235,22 @@ def run_bot(settings):
 
         async def heartbeat():
             from pathlib import Path
+            from vagasunb.db import Setting, now
 
             while True:
                 directory = Path(os.getenv("VAGAS_HEARTBEAT_DIR", ".private"))
                 directory.mkdir(exist_ok=True)
                 (directory / "bot.heartbeat").write_text(str(time.time()))
+                try:
+                    async with db.transaction() as s:
+                        await s.merge(
+                            Setting(
+                                key="bot_health",
+                                value={"pid": os.getpid(), "at": now().isoformat()},
+                            )
+                        )
+                except Exception:
+                    pass
                 await asyncio.sleep(5)
 
         state["heartbeat"] = asyncio.create_task(heartbeat())
@@ -258,8 +271,17 @@ def run_bot(settings):
         .post_shutdown(shutdown)
         .build()
     )
+    async def on_error(update, context):
+        import logging
+        from vagasunb.operations import error_code
+
+        logging.getLogger("vagasunb.telegram").warning(
+            "telegram_handler_error code=%s", error_code(context.error)
+        )
+
     handler = partial(handle_update, db=db, vault=vault)
     app.add_handler(CallbackQueryHandler(handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handler))
+    app.add_error_handler(on_error)
     # Commands are intentionally not registered remotely.
     app.run_polling(allowed_updates=["message", "callback_query"])

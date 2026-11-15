@@ -296,3 +296,40 @@ async def test_slow_catalog_cadence_keeps_short_delivery_ttl(db, vault):
         await observe(s, rows, "demo", at)
     async with db.transaction() as s:
         assert await observe(s, rows, "demo", at + timedelta(seconds=11)) == 1
+
+
+async def test_levels_filter_and_priority_order(db):
+    order = []
+
+    class MultiLevelSource(ManyScopes):
+        async def discover(self):
+            return {
+                "period": "DEMO.1",
+                "units": [{"id": "U1", "name": "U1"}, {"id": "U2", "name": "U2"}],
+                "levels": [{"id": "M", "name": "Mestrado"}, {"id": "G", "name": "Graduação"}],
+            }
+
+        async def collect(self, unit, period, level):
+            order.append((unit, level))
+            return [dict(fixtures()[0], units=[unit])]
+
+    await collect_catalog(db, MultiLevelSource(), "demo")
+    assert [lvl for _, lvl in order] == ["G", "G", "M", "M"]
+
+    order.clear()
+    async with db.transaction() as s:
+        await change_options(s, {"levels": ["G"]})
+    result = await collect_catalog(db, MultiLevelSource(), "demo")
+    assert result["status"] == "complete"
+    assert order == [("U1", "G"), ("U2", "G")]
+
+
+async def test_router_slash_buscar_with_query_and_bot_mention(db, vault):
+    from vagasunb.router import route
+
+    async with db.transaction() as s:
+        v1 = await route(s, vault, 909001, text="/start@MeuUnBBot", synthetic=True)
+        assert "VagasUnB" in v1.text
+        v2 = await route(s, vault, 909001, text="/buscar@MeuUnBBot DEMO0001", synthetic=True)
+        assert "Resultados:" in v2.text and "Resultados: 0" not in v2.text
+        assert any("DEMO0001" in btn["label"] for btn in v2.buttons)

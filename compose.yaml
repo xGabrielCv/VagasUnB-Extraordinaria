@@ -12,6 +12,7 @@ x-app: &app
     VAGAS_MODE: demo
     VAGAS_SECRETS: /run/secrets
     VAGAS_HOST: 127.0.0.1:8765
+    VAGAS_CLOUDBEAVER_URL: http://cloudbeaver:8978
     PGHOST: postgres
     PGPASSWORD_FILE: /run/secrets/postgres_password
     VAGAS_HEARTBEAT_DIR: /tmp
@@ -82,11 +83,24 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+  cloudbeaver:
+    image: dbeaver/cloudbeaver:latest
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 512m
+    networks: [internal]
+    depends_on:
+      postgres: {condition: service_healthy}
+    volumes:
+      - demo_cloudbeaver:/opt/cloudbeaver/workspace
+      - ./deploy/cloudbeaver/.cloudbeaver.runtime.conf:/opt/cloudbeaver/workspace/.data/.cloudbeaver.runtime.conf:ro
+      - ./deploy/cloudbeaver/demo-sources.conf:/opt/cloudbeaver/conf/initial-data-sources.conf:ro
 secrets:
   keys.json: {file: ./.private/secrets/keys.json}
   postgres_password: {file: ./.private/secrets/postgres_password}
 volumes:
   demo_postgres:
+  demo_cloudbeaver:
 networks:
   internal: {internal: true}
   outgoing:

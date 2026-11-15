@@ -12,10 +12,12 @@ x-public: &public
     VAGAS_MODE: public
     VAGAS_SECRETS: /run/secrets
     VAGAS_HOST: 127.0.0.1:8766
+    VAGAS_CLOUDBEAVER_URL: http://cloudbeaver:8978
     VAGAS_HEARTBEAT_DIR: /tmp
     PGHOST: postgres
     PGPASSWORD_FILE: /run/secrets/postgres_password
-  secrets: [keys.json, postgres_password]
+    VAGAS_TELEGRAM_ENABLE: ${VAGAS_TELEGRAM_ENABLE:-0}
+  secrets: [keys.json, postgres_password, telegram_token]
   logging:
     driver: json-file
     options: {max-size: 5m, max-file: "4"}
@@ -67,11 +69,37 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+  bot:
+    <<: *public
+    profiles: [telegram]
+    command: [python, -m, vagasunb.cli, bot]
+    networks: [database, outgoing]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import pathlib,time; p=pathlib.Path('/tmp/bot.heartbeat'); assert p.exists() and time.time()-float(p.read_text())<30"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  cloudbeaver:
+    image: dbeaver/cloudbeaver:latest
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 512m
+    networks: [database]
+    depends_on:
+      postgres: {condition: service_healthy}
+    volumes:
+      - public_cloudbeaver:/opt/cloudbeaver/workspace
+      - ./deploy/cloudbeaver/.cloudbeaver.runtime.conf:/opt/cloudbeaver/workspace/.data/.cloudbeaver.runtime.conf:ro
+      - ./deploy/cloudbeaver/public-sources.conf:/opt/cloudbeaver/conf/initial-data-sources.conf:ro
 secrets:
   keys.json: {file: ./.private/public/secrets/keys.json}
   postgres_password: {file: ./.private/public/secrets/postgres_password}
+  telegram_token: {file: ./.private/public/secrets/telegram_token}
 volumes:
   public_postgres:
+  public_cloudbeaver:
 networks:
   database: {internal: true}
   outgoing:

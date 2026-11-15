@@ -12,10 +12,11 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 import psutil
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -54,7 +55,12 @@ def create_app(settings=None):
     vault = Vault(cfg.secrets)
     started = time.monotonic()
     login_attempts = deque(maxlen=50)
+    db_attempts = deque(maxlen=50)
     nonce_key = secrets.token_bytes(32)
+    cb_url = os.getenv("VAGAS_CLOUDBEAVER_URL", "http://127.0.0.1:8978").rstrip("/")
+    cb_client = httpx.AsyncClient(
+        base_url=cb_url, follow_redirects=False, timeout=httpx.Timeout(30.0, connect=2.0)
+    )
 
     @asynccontextmanager
     async def lifespan(app):
@@ -64,8 +70,11 @@ def create_app(settings=None):
 
             await verify_instance(s, vault, cfg.mode)
             await seed(s, cfg.mode)
-        yield
-        await db.close()
+        try:
+            yield
+        finally:
+            await app.state.cb_client.aclose()
+            await db.close()
 
     app = FastAPI(
         title="VagasUnB (Extraordinária)",
@@ -75,6 +84,7 @@ def create_app(settings=None):
         lifespan=lifespan,
     )
     app.state.db, app.state.vault, app.state.settings = db, vault, cfg
+    app.state.cb_client = cb_client
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=[cfg.host.split(":")[0], "localhost", "127.0.0.1", "testserver"],
@@ -117,15 +127,17 @@ def create_app(settings=None):
                 status_code=307,
             )
         response = await call_next(request)
-        response.headers.update(
-            {
-                "Cache-Control": "no-store",
-                "X-Content-Type-Options": "nosniff",
-                "Referrer-Policy": "same-origin",
-                "X-Frame-Options": "DENY",
-                "Content-Security-Policy": "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self'",
-            }
-        )
+        base_headers = {
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "same-origin",
+        }
+        if not request.url.path.startswith("/cloudbeaver"):
+            base_headers["X-Frame-Options"] = "DENY"
+            base_headers["Content-Security-Policy"] = (
+                "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self'"
+            )
+        response.headers.update(base_headers)
         return response
 
     async def authenticated(request):
@@ -289,9 +301,25 @@ def create_app(settings=None):
         await authenticated(request)
         async with db.transaction() as s:
             worker = await s.get(Setting, "worker_health")
+            bot_health = await s.get(Setting, "bot_health")
             ops = await options(s)
             cycle = await s.get(Setting, "catalog_cycle_" + ops["source"])
             complete = await s.get(Setting, "catalog_complete_" + ops["source"])
+            token_file = cfg.secrets / "telegram_token"
+            has_token = token_file.exists() and bool(token_file.read_text().strip())
+            telegram_enabled = cfg.mode == "public" and os.getenv("VAGAS_TELEGRAM_ENABLE") == "1"
+            period_total = await s.scalar(
+                select(func.count()).select_from(Classroom).where(Classroom.period == ops["period"])
+            )
+            with_vacancies = await s.scalar(
+                select(func.count())
+                .select_from(Classroom)
+                .where(
+                    Classroom.period == ops["period"],
+                    Classroom.offered.is_not(None),
+                    Classroom.offered > Classroom.occupied,
+                )
+            )
             states = dict(
                 (await s.execute(select(Outbox.status, func.count()).group_by(Outbox.status))).all()
             )
@@ -326,6 +354,14 @@ def create_app(settings=None):
                     task: state(ops, task, now()) for task in ("register", "collect", "dispatch")
                 },
                 "worker": worker.value if worker else {"status": "not_started"},
+                "bot": bot_health.value if bot_health else {"status": "not_started"},
+                "telegram_enabled": telegram_enabled,
+                "telegram_token": has_token,
+                "timezone": ops["timezone"],
+                "period_stats": {
+                    "total": period_total or 0,
+                    "with_vacancies": with_vacancies or 0,
+                },
                 "desired_s": ops["interval"],
                 "screen_s": ops["screen_interval"],
                 "outbox": states,
@@ -431,6 +467,7 @@ def create_app(settings=None):
             await s.delete(session)
         response = RedirectResponse("/login", status_code=303)
         response.delete_cookie("session")
+        response.delete_cookie("vagas_db_gate")
         return response
 
     @app.get("/", response_class=HTMLResponse)
@@ -482,6 +519,7 @@ def create_app(settings=None):
                 select(func.min(Outbox.created)).where(Outbox.status.in_(["pending", "retry"]))
             )
             query = request.query_params.get("q", "")[:120]
+            vacancies_only = request.query_params.get("vacancies") == "1"
             page = max(
                 0,
                 min(
@@ -493,10 +531,28 @@ def create_app(settings=None):
             )
             from vagasunb.catalog import search
 
-            catalog, total, approximate = await search(s, query, ops["period"], page)
+            catalog, total, approximate = await search(
+                s, query, ops["period"], page, vacancies=vacancies_only
+            )
+            period_total = await s.scalar(
+                select(func.count()).select_from(Classroom).where(Classroom.period == ops["period"])
+            )
+            with_vacancies = await s.scalar(
+                select(func.count())
+                .select_from(Classroom)
+                .where(
+                    Classroom.period == ops["period"],
+                    Classroom.offered.is_not(None),
+                    Classroom.offered > Classroom.occupied,
+                )
+            )
             runs = (await s.scalars(select(Run).order_by(Run.started.desc()).limit(100))).all()
             events = (await s.scalars(select(Event).order_by(Event.created.desc()).limit(60))).all()
             heartbeat = await s.get(Setting, "worker_health")
+            bot_health = await s.get(Setting, "bot_health")
+            token_file = cfg.secrets / "telegram_token"
+            has_token = token_file.exists() and bool(token_file.read_text().strip())
+            telegram_enabled = cfg.mode == "public" and os.getenv("VAGAS_TELEGRAM_ENABLE") == "1"
             database_size = await s.scalar(text("SELECT pg_database_size(current_database())"))
             tables = (
                 (
@@ -526,6 +582,11 @@ def create_app(settings=None):
                 total=total,
                 approximate=approximate,
                 q=query,
+                vacancies=vacancies_only,
+                period_stats={"total": period_total or 0, "with_vacancies": with_vacancies or 0},
+                telegram_enabled=telegram_enabled,
+                telegram_token=has_token,
+                bot_health=bot_health.value if bot_health else None,
                 page=page,
                 runs=runs[:20],
                 events=events,
@@ -650,6 +711,14 @@ def create_app(settings=None):
                         if not re.fullmatch(r"\d{4}\.\d", period):
                             raise ValueError()
                     values["source"] = source
+                    if "levels_mode" in form:
+                        mode_choice = str(form["levels_mode"])
+                        if mode_choice == "G":
+                            values["levels"] = ["G"]
+                        elif mode_choice == "all":
+                            values["levels"] = []
+                        else:
+                            raise ValueError()
                     if source == "demo" and not period.startswith("DEMO"):
                         raise ValueError()
                     await change_options(s, values)
@@ -681,6 +750,323 @@ def create_app(settings=None):
             media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=events.csv"},
         )
+
+    DB_GATE_TTL = 900
+
+    def db_gate_remaining(cookies, session):
+        raw = cookies.get("vagas_db_gate", "")
+        exp, _, sig = raw.partition(".")
+        if not exp.isdigit():
+            return 0
+        rem = int(exp) - int(time.time())
+        expected = hmac.new(
+            nonce_key, f"{session.digest}:{exp}".encode(), hashlib.sha256
+        ).hexdigest()
+        if rem <= 0 or not secrets.compare_digest(sig, expected):
+            return 0
+        return rem
+
+    def set_db_gate(response, session):
+        exp = str(int(time.time()) + DB_GATE_TTL)
+        sig = hmac.new(
+            nonce_key, f"{session.digest}:{exp}".encode(), hashlib.sha256
+        ).hexdigest()
+        response.set_cookie(
+            "vagas_db_gate",
+            f"{exp}.{sig}",
+            httponly=True,
+            samesite="lax",
+            secure=cfg.secure,
+            max_age=DB_GATE_TTL,
+            path="/",
+        )
+
+    async def render_db(request, session, error="", status=200):
+        async with db.transaction() as s:
+            db_hash = await s.get(Setting, "db_auth_hash")
+        cb_online = False
+        try:
+            probe = await app.state.cb_client.get("/cloudbeaver/status", timeout=0.8)
+            cb_online = probe.status_code < 500
+        except Exception:
+            cb_online = False
+        u = urlsplit(cfg.database_url)
+        rem = db_gate_remaining(request.cookies, session)
+        return templates.TemplateResponse(
+            request=request,
+            name="db.html",
+            context={
+                "csrf": session.csrf,
+                "configured": db_hash is not None,
+                "unlocked": db_hash is not None and rem > 0,
+                "remaining_s": rem,
+                "cb_online": cb_online,
+                "cb_url": cb_url,
+                "db_info": {
+                    "host": u.hostname or "127.0.0.1",
+                    "port": u.port or 5432,
+                    "database": u.path.lstrip("/") or "vagas",
+                    "user": u.username or "vagas",
+                },
+                "error": error,
+                "saved": request.query_params.get("saved") == "1",
+                "unlocked_msg": request.query_params.get("unlocked") == "1",
+            },
+            status_code=status,
+        )
+
+    async def verify_distinct_db_password(s, password):
+        admin = await s.get(Admin, 1)
+        if not admin:
+            raise ValueError("Administrador principal não configurado.")
+        try:
+            await asyncio.to_thread(PasswordHasher().verify, admin.password, password)
+        except VerificationError:
+            return
+        raise ValueError("Use uma senha diferente da senha principal do painel.")
+
+    @app.get("/db", response_class=HTMLResponse)
+    async def db_page(request: Request):
+        try:
+            session = await authenticated(request)
+        except HTTPException:
+            return RedirectResponse("/login", status_code=303)
+        return await render_db(request, session)
+
+    @app.post("/db/setup", response_class=HTMLResponse)
+    async def db_setup(request: Request):
+        form = await mutation(request)
+        session = await authenticated(request)
+        try:
+            password = validate_password(form)
+            async with db.transaction() as s:
+                await lock(s, "admin", "db_credential")
+                if await s.get(Setting, "db_auth_hash"):
+                    return RedirectResponse("/db", status_code=303)
+                await verify_distinct_db_password(s, password)
+                hashed = await asyncio.to_thread(PasswordHasher().hash, password)
+                await s.merge(Setting(key="db_auth_hash", value={"hash": hashed}))
+                s.add(Event(category="admin", code="db_auth_configured", values={}))
+        except ValueError as exc:
+            return await render_db(request, session, error=str(exc), status=400)
+        response = RedirectResponse("/db?saved=1", status_code=303)
+        set_db_gate(response, session)
+        return response
+
+    @app.post("/db/unlock", response_class=HTMLResponse)
+    async def db_unlock(request: Request):
+        form = await mutation(request)
+        session = await authenticated(request)
+        t = time.monotonic()
+        while db_attempts and db_attempts[0] < t - 60:
+            db_attempts.popleft()
+        if len(db_attempts) >= 8:
+            return await render_db(
+                request,
+                session,
+                error="Aguarde um minuto antes de tentar novamente.",
+                status=429,
+            )
+        db_attempts.append(t)
+        async with db.transaction() as s:
+            await lock(s, "admin", "db_credential")
+            entry = await s.get(Setting, "db_auth_hash")
+        try:
+            pw = str(form.get("password", ""))
+            if not entry or len(pw) > 256:
+                raise ValueError()
+            await asyncio.to_thread(PasswordHasher().verify, entry.value["hash"], pw)
+        except (VerificationError, ValueError):
+            return await render_db(
+                request, session, error="Senha adicional inválida.", status=401
+            )
+        response = RedirectResponse("/db?unlocked=1", status_code=303)
+        set_db_gate(response, session)
+        return response
+
+    @app.post("/db/lock")
+    async def db_lock(request: Request):
+        await mutation(request)
+        response = RedirectResponse("/db", status_code=303)
+        response.delete_cookie("vagas_db_gate", path="/")
+        return response
+
+    @app.post("/db/password", response_class=HTMLResponse)
+    async def db_password(request: Request):
+        form = await mutation(request)
+        session = await authenticated(request)
+        try:
+            password = validate_password(form)
+            async with db.transaction() as s:
+                await lock(s, "admin", "db_credential")
+                entry = await s.get(Setting, "db_auth_hash")
+                if not entry:
+                    raise ValueError("Senha adicional ainda não configurada.")
+                await asyncio.to_thread(
+                    PasswordHasher().verify, entry.value["hash"], str(form.get("current", ""))[:257]
+                )
+                await verify_distinct_db_password(s, password)
+                entry.value = {"hash": await asyncio.to_thread(PasswordHasher().hash, password)}
+                s.add(Event(category="admin", code="db_password_changed", values={}))
+        except (ValueError, VerificationError) as exc:
+            msg = str(exc) if isinstance(exc, ValueError) else "Senha adicional atual inválida."
+            return await render_db(request, session, error=msg, status=400)
+        response = RedirectResponse("/db?saved=1", status_code=303)
+        set_db_gate(response, session)
+        return response
+
+    def _forward_cookies(raw_cookie):
+        admin_names = {"session", "vagas_db_gate", "login_nonce"}
+        parts = [
+            c.strip()
+            for c in raw_cookie.split(";")
+            if c.strip() and c.split("=", 1)[0].strip() not in admin_names
+        ]
+        return "; ".join(parts)
+
+    async def _require_cb_access(cookies):
+        token = cookies.get("session", "")
+        async with db.transaction() as s:
+            session = await s.get(AdminSession, digest(token)) if token else None
+            if not session or session.expires <= now():
+                return None, False
+            configured = await s.get(Setting, "db_auth_hash") is not None
+        return session, configured and db_gate_remaining(cookies, session) > 0
+
+    @app.api_route(
+        "/cloudbeaver",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    )
+    @app.api_route(
+        "/cloudbeaver/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    )
+    async def cloudbeaver_proxy(request: Request, path: str = ""):
+        session, unlocked = await _require_cb_access(request.cookies)
+        if not session:
+            if request.method == "GET":
+                return RedirectResponse("/login", status_code=303)
+            raise HTTPException(401, "Autenticação necessária")
+        if not unlocked:
+            if request.method == "GET":
+                return RedirectResponse("/db", status_code=303)
+            raise HTTPException(401, "Autenticação adicional de banco necessária")
+        if request.url.path == "/cloudbeaver":
+            q = f"?{request.url.query}" if request.url.query else ""
+            return RedirectResponse("/cloudbeaver/" + q, status_code=307)
+        target = f"/cloudbeaver/{path}" + (f"?{request.url.query}" if request.url.query else "")
+        fwd_headers = {
+            "X-Forwarded-Prefix": "/cloudbeaver",
+            "X-Forwarded-Proto": "https" if cfg.secure else "http",
+            "X-Forwarded-Host": request.headers.get("host", cfg.host),
+        }
+        for h in ("accept", "accept-language", "content-type", "x-requested-with"):
+            if h in request.headers:
+                fwd_headers[h] = request.headers[h]
+        filtered_cookie = _forward_cookies(request.headers.get("cookie", ""))
+        if filtered_cookie:
+            fwd_headers["cookie"] = filtered_cookie
+        try:
+            upstream = await app.state.cb_client.request(
+                request.method,
+                target,
+                headers=fwd_headers,
+                content=await request.body(),
+            )
+        except httpx.HTTPError:
+            return HTMLResponse(
+                "<h1>CloudBeaver indisponível</h1><p>O serviço CloudBeaver não respondeu. Verifique o container <code>cloudbeaver</code> ou use o DBeaver Community localmente.</p><p><a href='/db'>Voltar</a></p>",
+                status_code=503,
+            )
+        hop = {
+            "transfer-encoding",
+            "connection",
+            "keep-alive",
+            "content-length",
+            "content-encoding",
+            "set-cookie",
+        }
+        resp_headers = [(k, v) for k, v in upstream.headers.multi_items() if k.lower() not in hop]
+        response = Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            headers=dict(resp_headers),
+        )
+        for k, v in resp_headers:
+            if k.lower() != "content-type":
+                continue
+            response.headers[k] = v
+        for sc in upstream.headers.get_list("set-cookie"):
+            response.headers.append("set-cookie", sc)
+        return response
+
+    @app.websocket("/cloudbeaver/{path:path}")
+    async def cloudbeaver_ws(websocket: WebSocket, path: str):
+        origin = websocket.headers.get("origin", "")
+        origin_host = urlsplit(origin).hostname or ""
+        if origin and origin_host.lower() not in {
+            cfg.host.split(":")[0].lower(),
+            "127.0.0.1",
+            "localhost",
+            "testserver",
+        }:
+            await websocket.close(code=1008)
+            return
+        session, unlocked = await _require_cb_access(websocket.cookies)
+        if not session or not unlocked:
+            await websocket.close(code=1008)
+            return
+        ws_base = cb_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        query = f"?{websocket.url.query}" if websocket.url.query else ""
+        ws_target = f"{ws_base}/cloudbeaver/{path}{query}"
+        headers = []
+        filtered_cookie = _forward_cookies(websocket.headers.get("cookie", ""))
+        if filtered_cookie:
+            headers.append(("cookie", filtered_cookie))
+        subprotocols = websocket.headers.get("sec-websocket-protocol")
+        proto_list = [p.strip() for p in subprotocols.split(",")] if subprotocols else None
+        try:
+            import websockets
+
+            async with websockets.connect(
+                ws_target, additional_headers=headers, subprotocols=proto_list
+            ) as upstream:
+                await websocket.accept(subprotocol=upstream.subprotocol)
+
+                async def c2u():
+                    try:
+                        while True:
+                            msg = await websocket.receive()
+                            if msg["type"] == "websocket.disconnect":
+                                break
+                            if msg.get("text") is not None:
+                                await upstream.send(msg["text"])
+                            elif msg.get("bytes") is not None:
+                                await upstream.send(msg["bytes"])
+                    except WebSocketDisconnect:
+                        pass
+
+                async def u2c():
+                    try:
+                        async for data in upstream:
+                            if isinstance(data, str):
+                                await websocket.send_text(data)
+                            else:
+                                await websocket.send_bytes(data)
+                    except Exception:
+                        pass
+
+                done, pending = await asyncio.wait(
+                    [asyncio.create_task(c2u()), asyncio.create_task(u2c())],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+        except Exception:
+            try:
+                await websocket.close(code=1011)
+            except Exception:
+                pass
 
     if cfg.mode == "demo":
 

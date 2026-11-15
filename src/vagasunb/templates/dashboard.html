@@ -23,7 +23,8 @@
 <a href="#delivery">↗ Monitoramentos e avisos</a>
 <a href="#operation">◷ Funcionamento e horários</a>
 <a href="#settings">⚙ Configurações</a>
-<a href="#records">≡ Registros e diagnóstico</a>{% if mode == 'demo' %}<a href="/demo">▷ Abrir simulador</a>{% endif %}</nav>
+<a href="#records">≡ Registros e diagnóstico</a>
+<a href="/db">🗄 Banco de dados</a>{% if mode == 'demo' %}<a href="/demo">▷ Abrir simulador</a>{% endif %}</nav>
 <form method="post" action="/logout">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 <button class="secondary">Sair</button>{{ help('Encerra esta sessão administrativa. Os serviços continuam funcionando.') }}</form>
@@ -36,7 +37,7 @@
 <h1>Visão geral</h1>
 <p>Catálogo compartilhado e monitoramento de vagas.</p>
 </div>
-<div><span class="pill">Telegram ainda não conectado — teste por simulação</span>{{ help('Esta fase não conecta o Telegram real. O simulador usa destinatários fictícios e não envia mensagens externas.') }}</div></header>
+<div><span class="pill" id="tg-pill">{% if telegram_enabled and telegram_token %}Telegram conectado (modo público){% elif telegram_token %}Token salvo · Telegram aguardando ativação{% else %}Telegram ainda não conectado — teste por simulação{% endif %}</span>{{ help('No modo de demonstração o simulador usa destinatários fictícios e não envia mensagens externas. No modo público com VAGAS_TELEGRAM_ENABLE=1 e token válido, o bot real atende os avisos.') }}</div></header>
 <div class="notice" id="situation">Consultando o estado local…</div>
 <p>Catálogo: <b>{{ catalog_source|label }}</b> · Período <b>{{ ops.period }}</b> · Horário de Brasília ({{ ops.timezone }}). {{ help('O catálogo público contém dados oficiais sujeitos a atraso. Demonstração usa dados fictícios. Buscar consulta apenas o banco local.') }}</p>
 <section class="cards">{% for name,value in counts.items() %}<article>
@@ -49,6 +50,7 @@
 {% for id,name,tip in [('coverage','Consultas válidas / previstas','Combinações de unidade e nível com resposta válida, incluindo respostas vazias. Não é porcentagem de todas as turmas existentes.'),('interval','Intervalo escolhido / observado','Frequência desejada entre inícios e intervalo efetivamente medido. Se o catálogo demora mais, o sistema espera sem sobrepor ciclos.'),('duration','Duração da atualização','Tempo total do ciclo. Bytes medem dados HTTP processados, sem toda a sobrecarga da conexão. Leitura e publicação usam milissegundos.'),('pending','Avisos aguardando envio','Soma de pendentes e novas tentativas seguras. Avisos antigos são cancelados antes do envio; resultado não confirmado não é reenviado automaticamente.')] %}<article>
 <span>{{ name }} {{ help(tip) }}</span>
 <strong id="live-{{ id }}">Aguardando medição</strong>
+{% if id == 'coverage' %}<div class="progress-track"><div id="live-progress"></div></div>{% endif %}
 <p id="{{ {'coverage':'live-status','interval':'live-next','duration':'live-network','pending':'live-worker'}[id] }}">
 </p>
 </article>{% endfor %}</div>
@@ -69,7 +71,7 @@
 </article>
 <article>
 <h3>Serviço em segundo plano {{ help('O último sinal mostra quando o processo respondeu. Um sinal recente não garante que o SIGAA esteja disponível; veja também o resultado da atualização.') }}</h3>{% if heartbeat %}<p>Último sinal: {{ heartbeat.at|brdate(ops.timezone) }}</p>
-<p>Atualizações: {{ heartbeat.collect|label }} · Avisos: {{ heartbeat.dispatch|label }}</p>{% else %}<p>Aguardando o primeiro sinal. Inicie pelos scripts locais.</p>{% endif %}</article>
+<p>Atualizações: {{ heartbeat.collect|label }} · Avisos: {{ heartbeat.dispatch|label }}</p>{% else %}<p>Aguardando o primeiro sinal. Inicie pelos scripts locais.</p>{% endif %}{% if telegram_enabled %}<p>Bot Telegram: {% if bot_health %}último sinal {{ bot_health.at|brdate(ops.timezone) }}{% else %}aguardando sinal do processo bot{% endif %}</p>{% endif %}</article>
 </div>
 </section>
 <section>
@@ -98,10 +100,11 @@
 <section id="catalog">
 <div class="section-head">
 <h2>Catálogo local {{ help('Mostra as turmas do período escolhido. Coleta parcial preserva dados anteriores. Informação antiga ou disponibilidade não confirmada não significa zero vagas.') }}</h2>
-<span>{{ total }} resultados · {{ ops.period }}</span>
+<span>{{ total }} resultados · {{ ops.period }}{% if period_stats %} ({{ period_stats.with_vacancies }} com vagas / {{ period_stats.total }} no período){% endif %}</span>
 </div>
 <form class="inline" method="get">
 <input name="q" aria-label="Buscar no catálogo" placeholder="Código, nome ou turma" value="{{ q }}" maxlength="120">
+<label class="check"><input type="checkbox" name="vacancies" value="1" {{ 'checked' if vacancies }}> Somente com vagas</label>
 <button>Buscar</button>{{ help('Busca paginada no banco local. Não consulta o SIGAA nem guarda o texto pesquisado.') }}</form>{% if approximate %}<p class="notice">Sugestões aproximadas.</p>{% endif %}
 <div class="table-wrap">
 <table>
@@ -111,7 +114,7 @@
 <tbody>{% for c in catalog %}<tr>
 <td>
 <b>{{ c.code }} · {{ c.number }}</b>
-<br>{{ c.name }}</td>
+<br>{{ c.name }}{% if c.teachers or c.schedule %}<br><small>{{ c.teachers or '' }}{% if c.teachers and c.schedule %} · {% endif %}{{ c.schedule or '' }}</small>{% endif %}</td>
 <td>{{ c.campus or 'Campus não identificado' }}<br>
 <small>{{ c.units|join(', ') }} · {{ c.provenance }}</small>
 </td>
@@ -126,7 +129,7 @@
 </tr>{% endfor %}</tbody>
 </table>
 </div>
-<p class="pagination">{% if page > 0 %}<a href="/?page={{ page-1 }}&amp;q={{ q|urlencode }}#catalog">← Anterior</a>{% endif %}Página {{ page+1 }}{% if (page+1)*6 < total %}<a href="/?page={{ page+1 }}&amp;q={{ q|urlencode }}#catalog">Próxima →</a>{% endif %}</p>
+<p class="pagination">{% if page > 0 %}<a href="/?page={{ page-1 }}&amp;q={{ q|urlencode }}{% if vacancies %}&amp;vacancies=1{% endif %}#catalog">← Anterior</a>{% endif %}Página {{ page+1 }}{% if (page+1)*6 < total %}<a href="/?page={{ page+1 }}&amp;q={{ q|urlencode }}{% if vacancies %}&amp;vacancies=1{% endif %}#catalog">Próxima →</a>{% endif %}</p>
 <form class="inline" method="post" action="/operations">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 <input type="hidden" name="action" value="collect">
@@ -222,6 +225,11 @@
 </select>
 </label>
 <label>Intervalo escolhido (segundos) {{ help('Pode ser cinco segundos, mas o catálogo real pode levar muitos minutos. Não cria ciclos sobrepostos.') }}<input name="interval" type="number" min="1" max="604800" value="{{ ops.interval }}" required>
+</label>
+<label>Níveis coletados {{ help('Graduação (G) termina bem mais rápido (~211 consultas). Todos os níveis inclui pós, mestrado e doutorado (~1.477 consultas).') }}<select name="levels_mode">
+<option value="all" {{ 'selected' if not ops.levels }}>Todos os níveis (completo)</option>
+<option value="G" {{ 'selected' if ops.levels == ['G'] }}>Somente Graduação (G — rápido)</option>
+</select>
 </label>
 <button>Salvar configuração</button>{{ help('Salva fonte, período, modo de atualização e intervalo juntos. Um ciclo ativo termina a consulta em curso antes da troca.') }}</form>
 <p>Cobertura: catálogo completo por unidades e níveis descobertos. {{ help('A descoberta define a cobertura. O antigo campo de unidades permanece preservado, mas não limita silenciosamente o catálogo global. Respostas vazias também contam como consultas válidas.') }}</p>
