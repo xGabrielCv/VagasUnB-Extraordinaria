@@ -197,6 +197,11 @@ async def test_cloudbeaver_db_gate_additional_auth_and_proxy(db, settings):
         # Admin logged in, but additional DB gate NOT unlocked yet -> blocked
         assert (await client.get("/cloudbeaver/")).status_code == 303
         assert (await client.post("/cloudbeaver/api")).status_code == 401
+        assert (
+            await client.post(
+                "/db/query", data={"csrf": csrf, "sql": "SELECT 1"}, headers=h
+            )
+        ).status_code == 303
 
         # Reject reusing panel password as additional DB password
         same = await client.post(
@@ -242,5 +247,21 @@ async def test_cloudbeaver_db_gate_additional_auth_and_proxy(db, settings):
         )
         assert reopen.status_code == 303
         assert (await client.get("/cloudbeaver/")).status_code == 200
+
+        # Integrated table viewer and SQL console on /db after additional auth
+        explorer = await client.get("/db?table=classrooms")
+        assert explorer.status_code == 200 and "DEMO0001" in explorer.text
+        q_ok = await client.post(
+            "/db/query",
+            data={"csrf": csrf, "sql": "SELECT code, number FROM classrooms LIMIT 3"},
+            headers=h,
+        )
+        assert q_ok.status_code == 200 and "DEMO0001" in q_ok.text
+        q_bad = await client.post(
+            "/db/query",
+            data={"csrf": csrf, "sql": "SELECT * FROM nonexistent_table_xyz"},
+            headers=h,
+        )
+        assert q_bad.status_code == 400 and "Erro SQL:" in q_bad.text
     await app.state.cb_client.aclose()
     await app.state.db.close()

@@ -8,28 +8,28 @@
 <header>
   <div>
     <span class="eyebrow">ACESSO PROTEGIDO AO BANCO</span>
-    <h1>Banco de dados &amp; CloudBeaver</h1>
-    <p>Camada adicional de autenticação sobre o painel administrativo para consulta ao PostgreSQL.</p>
+    <h1>Banco de dados &amp; Visualizador</h1>
+    <p>Camada adicional de autenticação sobre o painel administrativo para visualizar e operar o PostgreSQL.</p>
   </div>
   <a class="button secondary" href="/">← Voltar ao painel</a>
 </header>
 
 {% if error %}<p class="notice warning" role="alert">{{ error }}</p>{% endif %}
 {% if saved %}<p class="notice" role="status">Configuração adicional de banco atualizada.</p>{% endif %}
-{% if unlocked_msg %}<p class="notice" role="status">Acesso ao CloudBeaver liberado por 15 minutos.</p>{% endif %}
+{% if unlocked_msg %}<p class="notice" role="status">Acesso ao visualizador liberado por 15 minutos.</p>{% endif %}
+{% if dbeaver_msg %}<p class="notice" role="status">DBeaver Community iniciado com a conexão local configurada.</p>{% endif %}
 
 <section class="grid">
   <article>
-    <h2>Estado do CloudBeaver Community</h2>
+    <h2>Conexão &amp; Visualizadores</h2>
     {% if cb_online %}
-      <p><span class="pill">Online</span> · Proxy autenticado ativo em <code>/cloudbeaver/</code>.</p>
+      <p><span class="pill">CloudBeaver Online</span> · Proxy autenticado ativo em <code>/cloudbeaver/</code>.</p>
     {% else %}
-      <p><span class="pill">Indisponível no momento</span> · Não respondeu em <code>{{ cb_url }}</code>.</p>
-      <p class="muted">Em ambiente Docker/VPS (<code>compose.yaml</code> / <code>compose.public.yaml</code>), o serviço <code>cloudbeaver</code> inicia automaticamente na rede interna, acessível apenas por este proxy.</p>
+      <p><span class="pill">Visualizador Integrado Ativo</span> · CloudBeaver Docker desligado localmente (<code>{{ cb_url }}</code>).</p>
+      <p class="muted">Em ambiente Docker/VPS (<code>compose.yaml</code> / <code>compose.public.yaml</code>), o CloudBeaver Community sobe conectado automaticamente em <code>/cloudbeaver/</code>. No Windows nativo, use o explorador abaixo ou o DBeaver Community.</p>
     {% endif %}
     <hr>
-    <h3>Conexão para DBeaver Community (local)</h3>
-    <p class="muted">Sem exibição de senha no painel. Consulte a senha privada em <code>.private/secrets/postgres_password</code>.</p>
+    <h3>Dados da conexão PostgreSQL</h3>
     <ul>
       <li><b>Host:</b> <code>{{ db_info.host }}</code></li>
       <li><b>Porta:</b> <code>{{ db_info.port }}</code></li>
@@ -41,7 +41,7 @@
   <article>
     <h2>Autenticação adicional (Camada 2)</h2>
     {% if not configured %}
-      <p>Defina uma senha adicional exclusiva (mínimo 12 caracteres, diferente da senha do painel) para liberar o CloudBeaver Community.</p>
+      <p>Defina uma senha adicional exclusiva (mínimo 12 caracteres, diferente da senha do painel) para liberar o visualizador e o CloudBeaver.</p>
       <form method="post" action="/db/setup">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label>Senha adicional do banco (mín. 12 caracteres)
@@ -53,21 +53,25 @@
         <button>Definir senha e liberar</button>
       </form>
     {% elif not unlocked %}
-      <p>Sua sessão do painel está autenticada. Informe a senha adicional para liberar <code>/cloudbeaver/</code> por 15 minutos.</p>
+      <p>Sua sessão do painel está autenticada. Informe a senha adicional para liberar tabelas, SQL e <code>/cloudbeaver/</code> por 15 minutos.</p>
       <form method="post" action="/db/unlock">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label>Senha adicional do banco
           <input type="password" name="password" maxlength="256" autocomplete="current-password" required>
         </label>
-        <button>Desbloquear CloudBeaver</button>
+        <button>Desbloquear banco de dados</button>
       </form>
     {% else %}
       <p><span class="pill">Desbloqueado</span> · Tempo restante desta janela: <b>{{ (remaining_s // 60) + 1 }} min</b>.</p>
       <div class="inline">
         {% if cb_online %}
           <a class="button" href="/cloudbeaver/" target="_blank" rel="noopener noreferrer">Abrir CloudBeaver Community →</a>
-        {% else %}
-          <a class="button secondary" href="/cloudbeaver/" target="_blank" rel="noopener noreferrer">Tentar abrir /cloudbeaver/</a>
+        {% endif %}
+        {% if dbeaver_available %}
+          <form method="post" action="/db/open-dbeaver">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button>Abrir DBeaver Community</button>
+          </form>
         {% endif %}
         <form method="post" action="/db/lock">
           <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -93,5 +97,75 @@
     {% endif %}
   </article>
 </section>
+
+{% if unlocked %}
+<section id="db-explorer">
+  <div class="section-head">
+    <h2>Explorador de Tabelas PostgreSQL</h2>
+    <span>{{ tables|length }} tabelas no esquema <code>public</code></span>
+  </div>
+  <div class="inline">
+    {% for tname, tcount in tables %}
+      <a class="button {{ '' if table_data and table_data.name == tname else 'secondary' }}" href="/db?table={{ tname|urlencode }}#db-explorer">{{ tname }} ({{ tcount }})</a>
+    {% endfor %}
+  </div>
+
+  {% if table_data %}
+    <h3>Tabela <code>{{ table_data.name }}</code> · {{ table_data.total }} registro(s)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>{% for col in table_data.columns %}<th>{{ col }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+          {% for row in table_data.rows %}
+            <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+          {% else %}
+            <tr><td colspan="{{ table_data.columns|length }}">Tabela vazia.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="pagination">
+      {% if table_data.page > 0 %}<a href="/db?table={{ table_data.name|urlencode }}&amp;page={{ table_data.page - 1 }}#db-explorer">← Anterior</a>{% endif %}
+      Página {{ table_data.page + 1 }}
+      {% if (table_data.page + 1) * 25 < table_data.total %}<a href="/db?table={{ table_data.name|urlencode }}&amp;page={{ table_data.page + 1 }}#db-explorer">Próxima →</a>{% endif %}
+    </p>
+  {% endif %}
+</section>
+
+<section id="db-sql">
+  <h2>Console SQL</h2>
+  <form method="post" action="/db/query#db-sql">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Consulta SQL (máximo de 100 linhas exibidas)
+      <textarea name="sql" rows="4" placeholder="SELECT code, number, period, offered, occupied FROM classrooms ORDER BY observed DESC LIMIT 20;" required>{{ sql_text }}</textarea>
+    </label>
+    <button>Executar SQL</button>
+  </form>
+
+  {% if sql_result %}
+    {% if sql_result.columns %}
+      <p class="muted">{{ sql_result.rowcount }} linha(s) retornada(s){% if sql_result.truncated %} (exibição limitada a 100){% endif %}.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>{% for col in sql_result.columns %}<th>{{ col }}</th>{% endfor %}</tr>
+          </thead>
+          <tbody>
+            {% for row in sql_result.rows %}
+              <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+            {% else %}
+              <tr><td colspan="{{ sql_result.columns|length }}">Nenhum resultado.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="notice" role="status">Comando executado com sucesso ({{ sql_result.rowcount }} linha(s) afetada(s)).</p>
+    {% endif %}
+  {% endif %}
+</section>
+{% endif %}
 </body>
 </html>

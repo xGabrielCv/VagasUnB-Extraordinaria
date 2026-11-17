@@ -781,9 +781,86 @@ def create_app(settings=None):
             path="/",
         )
 
-    async def render_db(request, session, error="", status=200):
+    def _dbeaver_exe():
+        if os.name != "nt":
+            return None
+        for candidate in (
+            Path(os.environ.get("LOCALAPPDATA", "")) / "DBeaver" / "dbeaver.exe",
+            Path(r"C:\Program Files\DBeaver\dbeaver.exe"),
+        ):
+            if candidate.is_file():
+                return candidate
+        return None
+
+    MASKED_COLUMNS = {
+        ("admins", "password"),
+        ("admin_sessions", "digest"),
+        ("admin_sessions", "csrf"),
+        ("recipients", "cipher"),
+    }
+
+    def _format_cell(table_name, col, val):
+        if (table_name, col) in MASKED_COLUMNS:
+            return "[protegido]"
+        if val is None:
+            return "NULL"
+        if isinstance(val, (bytes, memoryview)):
+            return f"<{len(val)} bytes>"
+        text_val = json.dumps(val, ensure_ascii=False) if isinstance(val, (dict, list)) else str(val)
+        return text_val if len(text_val) <= 140 else text_val[:137] + "..."
+
+    async def render_db(
+        request, session, error="", status=200, sql_text="", sql_result=None
+    ):
+        table_names = []
+        table_counts = {}
+        selected_table = request.query_params.get("table", "")
+        page_raw = request.query_params.get("page", "0")
+        page = max(0, min(10000, int(page_raw) if page_raw.isdigit() else 0))
+        table_data = None
+
         async with db.transaction() as s:
             db_hash = await s.get(Setting, "db_auth_hash")
+            rem = db_gate_remaining(request.cookies, session)
+            unlocked = db_hash is not None and rem > 0
+            if unlocked:
+                rows_tbl = (
+                    await s.execute(
+                        text(
+                            "SELECT t.tablename, COALESCE(st.n_live_tup, 0) AS approx_rows "
+                            "FROM pg_catalog.pg_tables t "
+                            "LEFT JOIN pg_catalog.pg_stat_user_tables st "
+                            "  ON st.schemaname = t.schemaname AND st.relname = t.tablename "
+                            "WHERE t.schemaname = 'public' "
+                            "ORDER BY t.tablename"
+                        )
+                    )
+                ).all()
+                table_names = [r[0] for r in rows_tbl]
+                table_counts = {r[0]: int(r[1]) for r in rows_tbl}
+                if selected_table not in table_counts and table_names:
+                    selected_table = "classrooms" if "classrooms" in table_counts else table_names[0]
+                if selected_table in table_counts:
+                    ident = '"' + selected_table.replace('"', '""') + '"'
+                    exact_total = await s.scalar(text(f"SELECT COUNT(*) FROM public.{ident}"))
+                    table_counts[selected_table] = int(exact_total or 0)
+                    res = await s.execute(
+                        text(f"SELECT * FROM public.{ident} LIMIT 25 OFFSET :off"),
+                        {"off": page * 25},
+                    )
+                    cols = list(res.keys())
+                    rows_out = [
+                        [_format_cell(selected_table, c, v) for c, v in zip(cols, row)]
+                        for row in res.all()
+                    ]
+                    table_data = {
+                        "name": selected_table,
+                        "columns": cols,
+                        "rows": rows_out,
+                        "total": int(exact_total or 0),
+                        "page": page,
+                    }
+
         cb_online = False
         try:
             probe = await app.state.cb_client.get("/cloudbeaver/status", timeout=0.8)
@@ -791,7 +868,7 @@ def create_app(settings=None):
         except Exception:
             cb_online = False
         u = urlsplit(cfg.database_url)
-        rem = db_gate_remaining(request.cookies, session)
+        dbeaver_path = _dbeaver_exe()
         return templates.TemplateResponse(
             request=request,
             name="db.html",
@@ -802,15 +879,22 @@ def create_app(settings=None):
                 "remaining_s": rem,
                 "cb_online": cb_online,
                 "cb_url": cb_url,
+                "dbeaver_available": dbeaver_path is not None
+                and cfg.host.split(":")[0] in {"127.0.0.1", "localhost", "testserver"},
                 "db_info": {
                     "host": u.hostname or "127.0.0.1",
                     "port": u.port or 5432,
                     "database": u.path.lstrip("/") or "vagas",
                     "user": u.username or "vagas",
                 },
+                "tables": [(name, table_counts[name]) for name in table_names],
+                "table_data": table_data,
+                "sql_text": sql_text,
+                "sql_result": sql_result,
                 "error": error,
                 "saved": request.query_params.get("saved") == "1",
                 "unlocked_msg": request.query_params.get("unlocked") == "1",
+                "dbeaver_msg": request.query_params.get("dbeaver") == "1",
             },
             status_code=status,
         )
@@ -890,6 +974,73 @@ def create_app(settings=None):
         response = RedirectResponse("/db", status_code=303)
         response.delete_cookie("vagas_db_gate", path="/")
         return response
+
+    @app.post("/db/query", response_class=HTMLResponse)
+    async def db_query(request: Request):
+        form = await mutation(request)
+        session = await authenticated(request)
+        if db_gate_remaining(request.cookies, session) <= 0:
+            return RedirectResponse("/db", status_code=303)
+        sql = str(form.get("sql", "")).strip()
+        if not sql or len(sql) > 4000:
+            return await render_db(
+                request,
+                session,
+                error="Informe uma consulta SQL (até 4000 caracteres).",
+                status=400,
+                sql_text=sql,
+            )
+        try:
+            async with db.transaction() as s:
+                res = await s.execute(text(sql))
+                if res.returns_rows:
+                    cols = list(res.keys())
+                    fetched = res.fetchmany(101)
+                    truncated = len(fetched) > 100
+                    rows = [
+                        [_format_cell("", c, v) for c, v in zip(cols, r)]
+                        for r in fetched[:100]
+                    ]
+                    sql_result = {
+                        "columns": cols,
+                        "rows": rows,
+                        "truncated": truncated,
+                        "rowcount": len(rows),
+                    }
+                else:
+                    sql_result = {
+                        "columns": [],
+                        "rows": [],
+                        "truncated": False,
+                        "rowcount": res.rowcount if res.rowcount is not None else 0,
+                    }
+            return await render_db(request, session, sql_text=sql, sql_result=sql_result)
+        except Exception as exc:
+            msg = str(getattr(exc, "orig", exc)).splitlines()[0][:240]
+            return await render_db(
+                request,
+                session,
+                error=f"Erro SQL: {msg}",
+                status=400,
+                sql_text=sql,
+            )
+
+    @app.post("/db/open-dbeaver")
+    async def db_open_dbeaver(request: Request):
+        await mutation(request)
+        session = await authenticated(request)
+        if db_gate_remaining(request.cookies, session) <= 0:
+            return RedirectResponse("/db", status_code=303)
+        exe = _dbeaver_exe()
+        if not exe or cfg.host.split(":")[0] not in {"127.0.0.1", "localhost", "testserver"}:
+            raise HTTPException(400, "DBeaver local não disponível neste ambiente.")
+        import subprocess
+
+        subprocess.Popen(
+            [str(exe), "-nosplash", "-con", "id=vagasunb-local|connect=true|openConsole=true"],
+            close_fds=True,
+        )
+        return RedirectResponse("/db?dbeaver=1", status_code=303)
 
     @app.post("/db/password", response_class=HTMLResponse)
     async def db_password(request: Request):

@@ -31,14 +31,15 @@ O setup não instala ferramentas do sistema. Instalação nativa existente é re
 ```powershell
 git clone https://github.com/xGabrielCv/VagasUnB-Extraordinaria.git
 cd VagasUnB-Extraordinaria
-.\scripts\setup.ps1
-.\scripts\start.ps1
+.\scripts\run.ps1
 ```
+
+O `.\scripts\run.ps1` verifica dependências (`uv`, PostgreSQL/Docker e DBeaver Community), instala o que faltar, inicializa banco/migrações, configura a conexão e credenciais do DBeaver localmente e inicia o painel e o coletor.
 
 Abra **http://127.0.0.1:8765** e cadastre sua senha no primeiro acesso.
 Não há senha padrão nem cadastro por e-mail. Depois, a troca de senha fica no painel.
 
-Sem Docker, com binários PostgreSQL 17 já disponíveis:
+Sem execução automática completa (apenas setup passo a passo):
 
 ```powershell
 .\scripts\setup.ps1 -NativePgBin 'C:\caminho\postgresql\bin'
@@ -47,6 +48,7 @@ Sem Docker, com binários PostgreSQL 17 já disponíveis:
 
 | Ação | Comando |
 |---|---|
+| Tudo-em-um (verifica/instala/inicia) | `.\scripts\run.ps1` |
 | Iniciar | `.\scripts\start.ps1` |
 | Parar | `.\scripts\stop.ps1` |
 | Reiniciar | `.\scripts\restart.ps1` |

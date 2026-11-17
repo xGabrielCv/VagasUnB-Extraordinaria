@@ -87,6 +87,16 @@ services:
     stop_grace_period: 20s
     mem_limit: 512m
     networks: [database]
+    secrets: [postgres_password]
+    entrypoint:
+      - sh
+      - -c
+      - |
+        export CB_PG_PASSWORD="$$(cat /run/secrets/postgres_password)"
+        export CB_ADMIN_NAME="vagas"
+        export CB_ADMIN_PASSWORD="$$CB_PG_PASSWORD"
+        export CB_SERVER_NAME="VagasUnB DB"
+        exec ./run-server.sh
     depends_on:
       postgres: {condition: service_healthy}
     volumes:
