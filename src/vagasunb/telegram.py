@@ -14,7 +14,7 @@ class BudgetRequest(HTTPXRequest):
     """All outgoing message flows use the same PostgreSQL budget, across processes."""
 
     def __init__(self, db, vault):
-        super().__init__()
+        super().__init__(connection_pool_size=64)
         from vagasunb.distribution import SendBudget
 
         self.budget, self.db, self.vault = SendBudget(db), db, vault
@@ -267,6 +267,7 @@ def run_bot(settings):
         ApplicationBuilder()
         .token(token)
         .request(BudgetRequest(db, vault))
+        .concurrent_updates(32)
         .post_init(startup)
         .post_shutdown(shutdown)
         .build()

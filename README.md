@@ -60,25 +60,32 @@ Sem execução automática completa (apenas setup passo a passo):
 **Reiniciar preserva banco, configurações e chaves.** Use `-NoBrowser` para não abrir uma aba.
 No Linux local: `sh scripts/linux.sh setup`, `start`, `status` ou `stop`.
 
-## 🌐 Subir em VPS (Docker + Telegram)
+## 🌐 Subir em VPS Oracle Cloud (ARM64 / AMD64 + Docker + Telegram)
 
-Para produção em VPS usando `compose.public.yaml` (PostgreSQL isolado + painel em `127.0.0.1:8766` + worker + bot):
+Compatível com VMs **Oracle Cloud Always Free** (Ampere ARM64 ou AMD x86_64) via `compose.public.yaml` (PostgreSQL isolado + painel em `127.0.0.1:8766` + CloudBeaver + worker + bot):
 
 ```sh
 sh scripts/linux.sh setup-public
 sh scripts/linux.sh start-public
 ```
 
-No painel (`http://127.0.0.1:8766`, via túnel SSH na VPS), cadastre a senha administrativa, escolha **Catálogo público SIGAA**, informe o período (ex.: `2026.2`) e salve.
-Quando o bot no `@BotFather` estiver criado, conecte com um comando:
+Em VMs com 1 GB de RAM, use `sh scripts/linux.sh start-public --no-cloudbeaver` (o explorador de tabelas e console SQL integrados em `/db` continuam disponíveis sem consumo extra).
+Não exponha portas públicas na VCN da Oracle: acesse o painel e o CloudBeaver com segurança por túnel SSH:
+
+```sh
+ssh -L 8766:127.0.0.1:8766 usuario@IP_DA_VPS_ORACLE
+```
+
+Abra `http://127.0.0.1:8766`, cadastre a senha administrativa, selecione **Catálogo público SIGAA**, informe o período (ex.: `2026.2`) e salve.
+Quando o bot no `@BotFather` estiver criado, conecte e valide em 1 comando:
 
 ```sh
 sh scripts/linux.sh telegram
 ```
 
-Informe o token: ele é salvo apenas em `.private/public/secrets/telegram_token` (`chmod 600`), ativa `VAGAS_TELEGRAM_ENABLE=1` e sobe os containers `worker` e `bot`.
+Informe o token: o script valida o `@bot` no Telegram, grava em `.private/public/secrets/telegram_token` (`chmod 600`), ativa `VAGAS_TELEGRAM_ENABLE=1` e sobe `admin`, `worker`, `cloudbeaver` e `bot`.
 
-No painel administrativo (`/db`), há integração com o **CloudBeaver Community** protegido por autenticação adicional para visualizar e consultar o PostgreSQL pela web tanto localmente (em Docker) quanto na VPS. No Windows nativo, use `.\scripts\configure-dbeaver.ps1 -Open` para conectar com o **DBeaver Community**.
+No painel administrativo (`/db`), após a **2ª senha (autenticação adicional)**, ficam disponíveis o **Explorador de Tabelas + Console SQL** integrados e o **CloudBeaver Community** (em Docker/VPS). No Windows nativo, `.\scripts\run.ps1` já deixa o **DBeaver Community** instalado, configurado com senha criptografada e driver JDBC pronto.
 
 ## 🧪 Demo ou catálogo público
 

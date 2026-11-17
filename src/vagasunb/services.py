@@ -292,16 +292,14 @@ async def cleanup(s, at=None):
         )
     )
     # One aggregate snapshot/day, no recipient identifiers or click histories.
-    from sqlalchemy import func
+    from sqlalchemy import func, text
 
     daily = await s.get(Setting, "metrics_daily")
     values = dict(daily.value) if daily else {}
     values[at.date().isoformat()] = {
         "recipients": await s.scalar(select(func.count()).select_from(Recipient)),
         "subscriptions": await s.scalar(select(func.count()).select_from(Subscription)),
-        "database_bytes": await s.scalar(
-            __import__("sqlalchemy").text("SELECT pg_database_size(current_database())")
-        ),
+        "database_bytes": await s.scalar(text("SELECT pg_database_size(current_database())")),
     }
     values = {
         day: counters

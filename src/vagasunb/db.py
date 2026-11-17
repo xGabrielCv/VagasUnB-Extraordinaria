@@ -76,7 +76,10 @@ class Classroom(Base):
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
-    __table_args__ = (UniqueConstraint("recipient_id", "code", "period"),)
+    __table_args__ = (
+        UniqueConstraint("recipient_id", "code", "period"),
+        Index("ix_subscription_match", "code", "period", "status"),
+    )
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     recipient_id: Mapped[str] = mapped_column(
         ForeignKey("recipients.id", ondelete="CASCADE"), index=True
@@ -170,7 +173,16 @@ class AdminSession(Base):
 
 class Database:
     def __init__(self, url):
-        self.engine = create_async_engine(url, echo=False, pool_pre_ping=True, hide_parameters=True)
+        self.engine = create_async_engine(
+            url,
+            echo=False,
+            pool_pre_ping=True,
+            pool_size=20,
+            max_overflow=30,
+            pool_timeout=15,
+            pool_recycle=1800,
+            hide_parameters=True,
+        )
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     def transaction(self):

@@ -18,7 +18,12 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     }
 }
 
-if (-not (Test-Path -LiteralPath $Python)) {
+$depsOk = $false
+if (Test-Path -LiteralPath $Python) {
+    & $Python -c "import vagasunb, websockets, cryptography, psycopg, fastapi" 2>$null
+    $depsOk = ($LASTEXITCODE -eq 0)
+}
+if (-not $depsOk) {
     uv sync --frozen --python 3.12
     Check-Exit 'sincronizacao de dependencias Python'
 }

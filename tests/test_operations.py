@@ -96,7 +96,7 @@ async def test_encrypted_export_restore_and_retention(
             assert r.origin == "demo"
             from sqlalchemy import text
 
-            assert await s.scalar(text("SELECT version_num FROM alembic_version")) == "0004"
+            assert await s.scalar(text("SELECT version_num FROM alembic_version")) == "0005"
         with pytest.raises(ValueError, match="vazio"):
             await restore(target, cfg, package, key)
     finally:

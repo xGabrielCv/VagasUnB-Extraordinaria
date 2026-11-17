@@ -263,5 +263,18 @@ async def test_cloudbeaver_db_gate_additional_auth_and_proxy(db, settings):
             headers=h,
         )
         assert q_bad.status_code == 400 and "Erro SQL:" in q_bad.text
+
+        # Password change requires valid current DB password and shares rate limit
+        bad_pw = await client.post(
+            "/db/password",
+            data={
+                "csrf": csrf,
+                "current": "wrong-current-pass",
+                "password": "new-second-layer-password",
+                "confirm": "new-second-layer-password",
+            },
+            headers=h,
+        )
+        assert bad_pw.status_code == 400
     await app.state.cb_client.aclose()
     await app.state.db.close()

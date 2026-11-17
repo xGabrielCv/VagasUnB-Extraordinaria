@@ -115,7 +115,7 @@ async def restore(db, settings, package, key_file):
     dump = raw[4 + length :]
     if (
         manifest["format"] != 1
-        or manifest["schema"] not in {"0002", "0003", "0004"}
+        or manifest["schema"] not in {"0002", "0003", "0004", "0005"}
         or manifest["mode"] != settings.mode
         or hashlib.sha256(dump).hexdigest() != manifest["sha256"]
     ):

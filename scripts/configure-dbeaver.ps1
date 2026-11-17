@@ -68,7 +68,53 @@ if ($prefsText -notmatch 'sample\.database\.canceled=') {
     Add-Content -LiteralPath $corePrefs -Value "eclipse.preferences.version=1`nsample.database.canceled=true`ntipOfTheDay=false"
 }
 
+$driverDir = Join-Path $env:APPDATA 'DBeaverData\drivers\maven\maven-central\org.postgresql'
+$jarFile = Join-Path $driverDir 'postgresql-42.7.13.jar'
+$pomFile = Join-Path $driverDir 'postgresql-42.7.13.pom'
+
+# Fast idempotent check: if everything matches current PostgreSQL endpoint + secret + JDBC cache, do nothing
 $dsPath = Join-Path $dbeaverDir 'data-sources.json'
+$credPath = Join-Path $dbeaverDir 'credentials-config.json'
+$alreadyReady = $false
+if ((Test-Path -LiteralPath $dsPath) -and (Test-Path -LiteralPath $credPath) -and (Test-Path -LiteralPath $jarFile) -and (Test-Path -LiteralPath $pomFile)) {
+    $env:VAGAS_DBEAVER_DS_PATH = $dsPath
+    $env:VAGAS_DBEAVER_CRED_PATH = $credPath
+    $env:VAGAS_DBEAVER_URL = "jdbc:postgresql://${pgHost}:${pgPort}/${pgDb}"
+    $env:VAGAS_DBEAVER_USER = $pgUser
+    $env:VAGAS_DBEAVER_PASS = $pgPass
+    try {
+        & $Python -c @"
+import json, os, sys
+from pathlib import Path
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+DBS_KEY = bytes([186, 187, 74, 159, 119, 74, 184, 83, 201, 108, 45, 101, 61, 254, 84, 74])
+ds = json.loads(Path(os.environ['VAGAS_DBEAVER_DS_PATH']).read_text(encoding='utf-8')).get('connections', {}).get('vagasunb-local', {})
+cfg = ds.get('configuration', {})
+if not (ds.get('save-password') is True and cfg.get('url') == os.environ['VAGAS_DBEAVER_URL'] and cfg.get('user') == os.environ['VAGAS_DBEAVER_USER']):
+    sys.exit(1)
+raw = Path(os.environ['VAGAS_DBEAVER_CRED_PATH']).read_bytes()
+dec = Cipher(algorithms.AES(DBS_KEY), modes.CBC(raw[:16])).decryptor()
+padded = dec.update(raw[16:]) + dec.finalize()
+unpadder = padding.PKCS7(128).unpadder()
+creds = json.loads((unpadder.update(padded) + unpadder.finalize()).decode('utf-8')).get('vagasunb-local', {}).get('#connection', {})
+if creds.get('user') != os.environ['VAGAS_DBEAVER_USER'] or creds.get('password') != os.environ['VAGAS_DBEAVER_PASS']:
+    sys.exit(1)
+"@ 2>$null
+        $alreadyReady = ($LASTEXITCODE -eq 0)
+    } finally {
+        Remove-Item Env:VAGAS_DBEAVER_DS_PATH, Env:VAGAS_DBEAVER_CRED_PATH, Env:VAGAS_DBEAVER_URL, Env:VAGAS_DBEAVER_USER, Env:VAGAS_DBEAVER_PASS -ErrorAction SilentlyContinue
+    }
+}
+
+if ($alreadyReady) {
+    Write-Host "DBeaver Community ja configurado (${pgHost}:${pgPort}/${pgDb})."
+    if ($Open -and $exe) {
+        Start-Process -FilePath $exe -ArgumentList @('-nosplash', '-con', 'id=vagasunb-local|connect=true|openConsole=true')
+    }
+    return
+}
 
 $data = [ordered]@{ folders = [ordered]@{}; connections = [ordered]@{} }
 if (Test-Path -LiteralPath $dsPath) {

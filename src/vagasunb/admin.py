@@ -937,21 +937,26 @@ def create_app(settings=None):
         set_db_gate(response, session)
         return response
 
-    @app.post("/db/unlock", response_class=HTMLResponse)
-    async def db_unlock(request: Request):
-        form = await mutation(request)
-        session = await authenticated(request)
+    def _db_rate_limited():
         t = time.monotonic()
         while db_attempts and db_attempts[0] < t - 60:
             db_attempts.popleft()
         if len(db_attempts) >= 8:
+            return True
+        db_attempts.append(t)
+        return False
+
+    @app.post("/db/unlock", response_class=HTMLResponse)
+    async def db_unlock(request: Request):
+        form = await mutation(request)
+        session = await authenticated(request)
+        if _db_rate_limited():
             return await render_db(
                 request,
                 session,
                 error="Aguarde um minuto antes de tentar novamente.",
                 status=429,
             )
-        db_attempts.append(t)
         async with db.transaction() as s:
             await lock(s, "admin", "db_credential")
             entry = await s.get(Setting, "db_auth_hash")
@@ -992,6 +997,7 @@ def create_app(settings=None):
             )
         try:
             async with db.transaction() as s:
+                await s.execute(text("SET LOCAL statement_timeout = '8000ms'"))
                 res = await s.execute(text(sql))
                 if res.returns_rows:
                     cols = list(res.keys())
@@ -1046,6 +1052,13 @@ def create_app(settings=None):
     async def db_password(request: Request):
         form = await mutation(request)
         session = await authenticated(request)
+        if _db_rate_limited():
+            return await render_db(
+                request,
+                session,
+                error="Aguarde um minuto antes de tentar novamente.",
+                status=429,
+            )
         try:
             password = validate_password(form)
             async with db.transaction() as s:
@@ -1137,16 +1150,16 @@ def create_app(settings=None):
             "content-encoding",
             "set-cookie",
         }
-        resp_headers = [(k, v) for k, v in upstream.headers.multi_items() if k.lower() not in hop]
+        resp_headers = {
+            k: (v[len(cb_url):] or "/cloudbeaver/" if k.lower() == "location" and v.startswith(cb_url) else v)
+            for k, v in upstream.headers.multi_items()
+            if k.lower() not in hop
+        }
         response = Response(
             content=upstream.content,
             status_code=upstream.status_code,
-            headers=dict(resp_headers),
+            headers=resp_headers,
         )
-        for k, v in resp_headers:
-            if k.lower() != "content-type":
-                continue
-            response.headers[k] = v
         for sc in upstream.headers.get_list("set-cookie"):
             response.headers.append("set-cookie", sc)
         return response

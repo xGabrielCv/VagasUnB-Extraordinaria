@@ -101,7 +101,8 @@ async def observe(s, observations, mode, at=None, stats=None):
             c.state, c.candidate = "UNKNOWN", None
             s.add(Event(category="collection", code="unknown_count", values={"count": 1}))
             continue
-        c.name, c.search = data["name"], normalize(data["name"])
+        if c.name != data["name"]:
+            c.name, c.search = data["name"], normalize(data["name"])
         c.teachers, c.schedule, c.location = (
             data.get("teachers"),
             data.get("schedule"),
