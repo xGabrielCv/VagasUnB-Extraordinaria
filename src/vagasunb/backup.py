@@ -148,7 +148,8 @@ async def restore(db, settings, package, key_file):
     from alembic.config import Config
 
     def upgrade(connection):
-        cfg = Config("alembic.ini")
+        ini = Path(__file__).resolve().parents[2] / "config" / "alembic.ini"
+        cfg = Config(str(ini))
         cfg.attributes["connection"] = connection
         command.upgrade(cfg, "head")
 

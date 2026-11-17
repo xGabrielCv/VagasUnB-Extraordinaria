@@ -21,7 +21,7 @@ function Assert-Docker {
  docker info --format '{{.ServerVersion}}' 2>$null | Out-Null
  Check-Exit 'Docker Desktop'
 }
-function Compose([string[]]$Arguments){Assert-Docker; & docker compose --project-name vagasunb-extraordinaria-demo @Arguments; Check-Exit 'Docker Compose'}
+function Compose([string[]]$Arguments){Assert-Docker; $cf=Join-Path $ProjectRoot 'deploy/compose.yaml'; & docker compose -f $cf --project-name vagasunb-extraordinaria-demo @Arguments; Check-Exit 'Docker Compose'}
 function Native-Config {Get-Content -Raw -LiteralPath (Join-Path $PrivateRoot 'native.json') | ConvertFrom-Json}
 function Native-Pg([string]$Command,[string[]]$Arguments){
  $cfg=Native-Config

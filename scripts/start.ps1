@@ -17,7 +17,7 @@ if(Test-Path -LiteralPath (Join-Path $PrivateRoot 'native.json')){
   if($other.Count){throw 'Já existe processo desta instância em outra URL. Use status/stop antes de mudar a porta; a instância anterior foi preservada.'}
   Stop-Apps
  }
- & (Join-Path $ProjectRoot '.venv/Scripts/alembic.exe') upgrade head
+ & (Join-Path $ProjectRoot '.venv/Scripts/alembic.exe') -c (Join-Path $ProjectRoot 'config/alembic.ini') upgrade head
  Check-Exit 'migrações'
  $shutdown=Join-Path $PrivateRoot 'shutdown'
  if(Test-Path -LiteralPath $shutdown){Remove-Item -LiteralPath $shutdown}

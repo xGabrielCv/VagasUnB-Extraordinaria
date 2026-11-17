@@ -5,12 +5,12 @@
 !src/**
 !migrations/
 !migrations/**
-!alembic.ini
+!config/
+!config/**
 !LICENSE
-!THIRD_PARTY_NOTICES
 !tests/
 !tests/**
-!compose.yaml
+!deploy/compose.yaml
 !.dockerignore
 **/__pycache__
 **/*.py[cod]

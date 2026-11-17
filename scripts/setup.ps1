@@ -36,7 +36,7 @@ if ($NativePgBin) {
         $encoded=[uri]::EscapeDataString($env:PGPASSWORD)
         if (-not (Test-Path -LiteralPath (Join-Path $PrivateRoot 'config.json'))) { @{mode='demo';database_url="postgresql+psycopg://vagas:$encoded@127.0.0.1:$($cfg.port)/vagas_demo"} | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $PrivateRoot 'config.json') }
     } finally { Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue }
-    & (Join-Path $ProjectRoot '.venv/Scripts/alembic.exe') upgrade head
+    & (Join-Path $ProjectRoot '.venv/Scripts/alembic.exe') -c (Join-Path $ProjectRoot 'config/alembic.ini') upgrade head
     Check-Exit 'migrações'
     & $Python -m vagasunb.cli seed
     Check-Exit 'catálogo demo'

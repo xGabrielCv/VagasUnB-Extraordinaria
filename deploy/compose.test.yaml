@@ -15,7 +15,7 @@ services:
       timeout: 2s
       retries: 30
   tests:
-    build: {context: ., target: tests}
+    build: {context: .., dockerfile: deploy/Dockerfile, target: tests}
     environment:
       VAGAS_MODE: demo
       PGHOST: postgres
@@ -25,6 +25,6 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
 secrets:
-  postgres_password: {file: ./.private/secrets/postgres_password}
+  postgres_password: {file: ../.private/secrets/postgres_password}
 networks:
   isolated: {internal: true}

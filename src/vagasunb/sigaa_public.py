@@ -1,4 +1,4 @@
-"""Public-only JSF flow adapted from Followw UnB (MIT); see THIRD_PARTY_NOTICES.
+"""Public-only JSF flow adapted from Followw UnB (MIT); see config/THIRD_PARTY_NOTICES.
 
 No authenticated client, academic credentials or persistent cookies are supported.
 """

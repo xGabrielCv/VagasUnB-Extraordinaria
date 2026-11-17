@@ -1,7 +1,7 @@
 name: vagasunb-extraordinaria-demo
 x-app: &app
   image: vagasunb-extraordinaria:local
-  build: .
+  build: {context: .., dockerfile: deploy/Dockerfile}
   init: true
   restart: unless-stopped
   stop_grace_period: 35s
@@ -44,7 +44,7 @@ services:
   migrate:
     <<: *app
     restart: "no"
-    command: [alembic, upgrade, head]
+    command: [alembic, -c, config/alembic.ini, upgrade, head]
     depends_on:
       postgres: {condition: service_healthy}
   admin:
@@ -103,11 +103,11 @@ services:
       postgres: {condition: service_healthy}
     volumes:
       - demo_cloudbeaver:/opt/cloudbeaver/workspace
-      - ./deploy/cloudbeaver/.cloudbeaver.runtime.conf:/opt/cloudbeaver/workspace/.data/.cloudbeaver.runtime.conf:ro
-      - ./deploy/cloudbeaver/demo-sources.conf:/opt/cloudbeaver/conf/initial-data-sources.conf:ro
+      - ./cloudbeaver/.cloudbeaver.runtime.conf:/opt/cloudbeaver/workspace/.data/.cloudbeaver.runtime.conf:ro
+      - ./cloudbeaver/demo-sources.conf:/opt/cloudbeaver/conf/initial-data-sources.conf:ro
 secrets:
-  keys.json: {file: ./.private/secrets/keys.json}
-  postgres_password: {file: ./.private/secrets/postgres_password}
+  keys.json: {file: ../.private/secrets/keys.json}
+  postgres_password: {file: ../.private/secrets/postgres_password}
 volumes:
   demo_postgres:
   demo_cloudbeaver:

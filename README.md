@@ -62,7 +62,7 @@ No Linux local: `sh scripts/linux.sh setup`, `start`, `status` ou `stop`.
 
 ## 🌐 Subir em VPS Oracle Cloud (ARM64 / AMD64 + Docker + Telegram)
 
-Compatível com VMs **Oracle Cloud Always Free** (Ampere ARM64 ou AMD x86_64) via `compose.public.yaml` (PostgreSQL isolado + painel em `127.0.0.1:8766` + CloudBeaver + worker + bot):
+Compatível com VMs **Oracle Cloud Always Free** (Ampere ARM64 ou AMD x86_64) via [deploy/compose.public.yaml](deploy/compose.public.yaml) (PostgreSQL isolado + painel em `127.0.0.1:8766` + CloudBeaver + worker + bot):
 
 ```sh
 sh scripts/linux.sh setup-public
@@ -125,4 +125,4 @@ Segredos e dados operacionais ficam fora do Git. Não compartilhe a pasta `.priv
 [💻 Código-fonte](https://github.com/xGabrielCv/VagasUnB-Extraordinaria) · [📄 MIT](LICENSE)
 
 Cliente público adaptado do [Followw UnB](https://github.com/xGabrielCv/2026-2-Followw).
-Créditos e licença em [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+Créditos e licença em [THIRD_PARTY_NOTICES](config/THIRD_PARTY_NOTICES).

@@ -38,6 +38,8 @@ def test_url():
             str(Path(sys.executable).with_name("alembic.exe"))
             if sys.platform == "win32"
             else "alembic",
+            "-c",
+            str(Path(__file__).resolve().parents[1] / "config" / "alembic.ini"),
             "upgrade",
             "head",
         ],

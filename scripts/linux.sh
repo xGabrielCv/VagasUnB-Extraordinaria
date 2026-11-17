@@ -1,10 +1,24 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
+dc_demo() {
+  if [ -f .env ]; then
+    docker compose -f deploy/compose.yaml --env-file .env "$@"
+  else
+    docker compose -f deploy/compose.yaml "$@"
+  fi
+}
+dc_pub() {
+  if [ -f .env ]; then
+    docker compose -f deploy/compose.public.yaml --env-file .env "$@"
+  else
+    docker compose -f deploy/compose.public.yaml "$@"
+  fi
+}
 case "${1:-status}" in
-  start) docker compose up -d --build admin worker cloudbeaver ;;
-  stop) docker compose stop ;;
-  status) docker compose ps ;;
+  start) dc_demo up -d --build admin worker cloudbeaver ;;
+  stop) dc_demo stop ;;
+  status) dc_demo ps ;;
   setup)
     test "$(id -u)" != 0 || { echo 'Execute setup como usuário sem root.'; exit 1; }
     uv sync --frozen --python 3.12
@@ -13,18 +27,18 @@ case "${1:-status}" in
     chmod 600 .private/secrets/*
     printf 'APP_UID=%s\nAPP_GID=%s\n' "$(id -u)" "$(id -g)" > .env
     mkdir -p .private/exports
-    docker compose build
-    docker compose up -d postgres
-    docker compose run --rm migrate
+    dc_demo build
+    dc_demo up -d postgres
+    dc_demo run --rm migrate
     echo "Abra o painel e cadastre sua senha no primeiro acesso." ;;
   export)
-    docker compose stop admin worker bot
-    docker compose run --rm -v "$PWD/.private/exports:/exports" -v "$PWD/.private/secrets/backup_key:/run/backup_key:ro" admin python -m vagasunb.cli export --directory /exports --key /run/backup_key ;;
+    dc_demo stop admin worker bot
+    dc_demo run --rm -v "$PWD/.private/exports:/exports" -v "$PWD/.private/secrets/backup_key:/run/backup_key:ro" admin python -m vagasunb.cli export --directory /exports --key /run/backup_key ;;
   restore)
     test -n "${2:-}" || { echo 'Informe o pacote privado'; exit 1; }
-    docker compose stop admin worker bot
-    docker compose up -d postgres
-    docker compose run --rm --no-deps -v "$PWD/.private/exports:/exports:ro" -v "$PWD/.private/secrets/backup_key:/run/backup_key:ro" admin python -m vagasunb.cli restore --package "/exports/$2" --key /run/backup_key ;;
+    dc_demo stop admin worker bot
+    dc_demo up -d postgres
+    dc_demo run --rm --no-deps -v "$PWD/.private/exports:/exports:ro" -v "$PWD/.private/secrets/backup_key:/run/backup_key:ro" admin python -m vagasunb.cli restore --package "/exports/$2" --key /run/backup_key ;;
   setup-public)
     test "$(id -u)" != 0 || { echo 'Execute setup como usuário sem root.'; exit 1; }
     command -v docker >/dev/null 2>&1 || { echo 'Docker não encontrado. Instale Docker e Compose v2.'; exit 1; }
@@ -33,7 +47,7 @@ case "${1:-status}" in
       uv sync --frozen --python 3.12
       VAGAS_PRIVATE=.private/public uv run python -m vagasunb.cli init-files
     else
-      docker compose -f compose.public.yaml build admin
+      dc_pub build admin
       docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/.private/public:/out" -e VAGAS_PRIVATE=/out vagasunb-extraordinaria:local python -m vagasunb.cli init-files
     fi
     touch .private/public/secrets/telegram_token
@@ -41,21 +55,21 @@ case "${1:-status}" in
     chmod 600 .private/public/secrets/*
     test -f .env || printf 'APP_UID=%s\nAPP_GID=%s\nVAGAS_TELEGRAM_ENABLE=0\n' "$(id -u)" "$(id -g)" > .env
     mkdir -p .private/public/exports
-    docker compose -f compose.public.yaml build
-    docker compose -f compose.public.yaml up -d postgres
-    docker compose -f compose.public.yaml run --rm migrate
+    dc_pub build
+    dc_pub up -d postgres
+    dc_pub run --rm migrate
     echo "Instância pública preparada ($(uname -m)). Use start-public para iniciar ou telegram para conectar o bot." ;;
   start-public)
     services="admin worker"
     test "${2:-}" = "--no-cloudbeaver" || services="$services cloudbeaver"
     if grep -q '^VAGAS_TELEGRAM_ENABLE=1$' .env 2>/dev/null; then
-      docker compose -f compose.public.yaml --profile telegram up -d --build $services bot
+      dc_pub --profile telegram up -d --build $services bot
     else
-      docker compose -f compose.public.yaml up -d --build $services
+      dc_pub up -d --build $services
     fi ;;
-  stop-public) docker compose -f compose.public.yaml --profile telegram stop ;;
-  status-public) docker compose -f compose.public.yaml --profile telegram ps ;;
-  logs-public) docker compose -f compose.public.yaml --profile telegram logs --tail=80 "${2:-}" ;;
+  stop-public) dc_pub --profile telegram stop ;;
+  status-public) dc_pub --profile telegram ps ;;
+  logs-public) dc_pub --profile telegram logs --tail=80 "${2:-}" ;;
   telegram)
     printf 'Token do BotFather: ' >&2
     stty -echo 2>/dev/null || true
@@ -78,7 +92,7 @@ case "${1:-status}" in
     chmod 600 .private/public/secrets/telegram_token
     unset token
     printf 'APP_UID=%s\nAPP_GID=%s\nVAGAS_TELEGRAM_ENABLE=1\n' "$(id -u)" "$(id -g)" > .env
-    docker compose -f compose.public.yaml --profile telegram up -d --build --force-recreate admin worker cloudbeaver bot
+    dc_pub --profile telegram up -d --build --force-recreate admin worker cloudbeaver bot
     echo "Telegram conectado no modo público (worker + bot ativos)." ;;
   *) echo 'Uso: linux.sh setup|start|stop|status|export|restore|setup-public|start-public [--no-cloudbeaver]|stop-public|status-public|logs-public [svc]|telegram'; exit 1 ;;
 esac

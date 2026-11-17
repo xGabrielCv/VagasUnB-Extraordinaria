@@ -6,11 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && apt-get update && apt-get install -y --no-install-recommends postgresql-client-17 \
     && rm -rf /var/lib/apt/lists/* && useradd -m -u 10001 app
 WORKDIR /app
-COPY pyproject.toml uv.lock LICENSE THIRD_PARTY_NOTICES ./
+COPY pyproject.toml uv.lock LICENSE config/THIRD_PARTY_NOTICES ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 COPY migrations ./migrations
-COPY alembic.ini ./
+COPY config ./config
 RUN uv sync --frozen --no-dev && mkdir -p /app/.private && chown -R app:app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 USER app
@@ -19,7 +19,8 @@ CMD ["uvicorn", "vagasunb.admin:create_app", "--factory", "--host", "0.0.0.0", "
 
 FROM runtime AS tests
 COPY --chown=app:app tests ./tests
-COPY --chown=app:app compose.yaml .dockerignore ./
+COPY --chown=app:app deploy/compose.yaml ./deploy/compose.yaml
+COPY --chown=app:app .dockerignore ./
 RUN uv sync --frozen
 CMD ["pytest", "-q", "--disable-socket", "--allow-hosts=postgres"]
 

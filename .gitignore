@@ -6,6 +6,7 @@
 /.env
 /.env.*
 !/.env.example
+!/deploy/.env.example
 __pycache__/
 *.py[cod]
 .pytest_cache/

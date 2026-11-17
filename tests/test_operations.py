@@ -17,12 +17,17 @@ from vagasunb.db import Classroom, Database, Recipient
 from vagasunb.services import options, register
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 async def test_migration_reapply_keeps_data(db, test_url):
     cmd = (
         str(Path(sys.executable).with_name("alembic.exe")) if sys.platform == "win32" else "alembic"
     )
     result = subprocess.run(
-        [cmd, "upgrade", "head"], env={**os.environ, "DATABASE_URL": test_url}, capture_output=True
+        [cmd, "-c", str(ROOT / "config" / "alembic.ini"), "upgrade", "head"],
+        env={**os.environ, "DATABASE_URL": test_url},
+        capture_output=True,
     )
     assert result.returncode == 0
     async with db.transaction() as s:
@@ -49,7 +54,7 @@ async def test_encrypted_export_restore_and_retention(
     from alembic.config import Config
 
     def migrate(connection, direction, revision):
-        config = Config("alembic.ini")
+        config = Config(str(ROOT / "config" / "alembic.ini"))
         config.attributes["connection"] = connection
         getattr(command, direction)(config, revision)
 
@@ -110,7 +115,7 @@ async def test_encrypted_export_restore_and_retention(
 
 
 def test_compose_isolation_and_build_allowlist():
-    compose = yaml.safe_load(Path("compose.yaml").read_text())
+    compose = yaml.safe_load((ROOT / "deploy" / "compose.yaml").read_text())
     assert not compose["services"]["postgres"].get("ports")
     assert compose["services"]["admin"]["ports"] == ["127.0.0.1:8765:8765"]
     assert compose["services"]["bot"]["profiles"] == ["telegram-future"]
@@ -118,6 +123,6 @@ def test_compose_isolation_and_build_allowlist():
         compose["services"]["admin"]["depends_on"]["migrate"]["condition"]
         == "service_completed_successfully"
     )
-    assert Path(".dockerignore").read_text().startswith("**\n")
+    assert (ROOT / ".dockerignore").read_text().startswith("**\n")
     for service in compose["services"].values():
         assert "docker.sock" not in json.dumps(service)

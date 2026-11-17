@@ -1,7 +1,7 @@
 # Explicit future public collection instance. Not started by demo scripts.
 name: vagasunb-extraordinaria-public
 x-public: &public
-  build: .
+  build: {context: .., dockerfile: deploy/Dockerfile}
   image: vagasunb-extraordinaria:local
   user: "${APP_UID:-10001}:${APP_GID:-10001}"
   init: true
@@ -45,7 +45,7 @@ services:
   migrate:
     <<: *public
     restart: "no"
-    command: [alembic, upgrade, head]
+    command: [alembic, -c, config/alembic.ini, upgrade, head]
     networks: [database]
     depends_on:
       postgres: {condition: service_healthy}
@@ -103,12 +103,12 @@ services:
       postgres: {condition: service_healthy}
     volumes:
       - public_cloudbeaver:/opt/cloudbeaver/workspace
-      - ./deploy/cloudbeaver/.cloudbeaver.runtime.conf:/opt/cloudbeaver/workspace/.data/.cloudbeaver.runtime.conf:ro
-      - ./deploy/cloudbeaver/public-sources.conf:/opt/cloudbeaver/conf/initial-data-sources.conf:ro
+      - ./cloudbeaver/.cloudbeaver.runtime.conf:/opt/cloudbeaver/workspace/.data/.cloudbeaver.runtime.conf:ro
+      - ./cloudbeaver/public-sources.conf:/opt/cloudbeaver/conf/initial-data-sources.conf:ro
 secrets:
-  keys.json: {file: ./.private/public/secrets/keys.json}
-  postgres_password: {file: ./.private/public/secrets/postgres_password}
-  telegram_token: {file: ./.private/public/secrets/telegram_token}
+  keys.json: {file: ../.private/public/secrets/keys.json}
+  postgres_password: {file: ../.private/public/secrets/postgres_password}
+  telegram_token: {file: ../.private/public/secrets/telegram_token}
 volumes:
   public_postgres:
   public_cloudbeaver:

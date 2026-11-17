@@ -1,11 +1,12 @@
 ﻿. "$PSScriptRoot/common.ps1"
+$testCompose = Join-Path $ProjectRoot 'deploy/compose.test.yaml'
 if (-not (Test-Path -LiteralPath (Join-Path $PrivateRoot 'native.json'))) {
     Assert-Docker
     try {
-        & docker compose --file compose.test.yaml --project-name vagasunb-extraordinaria-test up --build --abort-on-container-exit --exit-code-from tests
+        & docker compose --file $testCompose --project-name vagasunb-extraordinaria-test up --build --abort-on-container-exit --exit-code-from tests
         Check-Exit 'testes em PostgreSQL efêmero isolado'
     } finally {
-        & docker compose --file compose.test.yaml --project-name vagasunb-extraordinaria-test down
+        & docker compose --file $testCompose --project-name vagasunb-extraordinaria-test down
     }
     return
 }
