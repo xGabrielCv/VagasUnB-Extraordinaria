@@ -25,6 +25,19 @@ class SourceError(Exception):
         super().__init__(code)
 
 
+def _proven_campus(unit_name):
+    norm = normalize(unit_name)
+    for marker, label in (
+        ("campus unb ceilandia", "Ceilândia"),
+        ("campus unb gama", "Gama"),
+        ("campus unb planaltina", "Planaltina"),
+        ("campus unb darcy ribeiro", "Darcy Ribeiro"),
+    ):
+        if marker in norm:
+            return label
+    return None
+
+
 def _merge_duplicate_row(prev, data):
     """Merge a SIGAA placeholder sub-row (offered is None) with its primary row."""
     if prev == data:
@@ -277,8 +290,11 @@ class PublicSource:
                     soup = BeautifulSoup(response.text, "html.parser")
                     rows = parse_results(soup, unit, period)
                     unit_name = next(u["name"] for u in self.metadata["units"] if u["id"] == unit)
+                    campus = _proven_campus(unit_name)
                     for row in rows:
                         row["provenance"] = "SIGAA público · " + unit_name
+                        if campus:
+                            row["campus"] = campus
                     try:
                         self.form, _ = self.read_form(soup)
                     except SourceError:

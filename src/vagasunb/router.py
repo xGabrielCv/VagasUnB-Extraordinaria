@@ -3,11 +3,11 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from html import escape
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from vagasunb.catalog import search
 from vagasunb.presentation import date_br, label as present
-from vagasunb.db import Callback, Classroom, Recipient, Subscription, lock, now
+from vagasunb.db import Callback, Classroom, Outbox, Recipient, Setting, Subscription, lock, now
 from vagasunb.services import erase, options, register, subscribe, subscription_action
 
 SOURCE = "https://github.com/xGabrielCv/VagasUnB-Extraordinaria"
@@ -143,12 +143,12 @@ async def route(
         return View(content, buttons)
 
     if action == "home":
-        subs = list(
-            (await s.scalars(select(Subscription).where(Subscription.recipient_id == rid))).all()
+        sub_count = await s.scalar(
+            select(func.count()).select_from(Subscription).where(Subscription.recipient_id == rid)
         )
         paused_note = " (alertas pausados)" if r.paused else ""
         return View(
-            f"🎓 <b>VagasUnB (Extraordinária)</b>\n\nMonitoramentos: {len(subs)}/10{paused_note}\nPeríodo: {escape(cfg['period'])}\nAs vagas podem mudar; consulte a última observação.\n\nPor onde vamos começar?",
+            f"🎓 <b>VagasUnB (Extraordinária)</b>\n\nMonitoramentos: {sub_count}/10{paused_note}\nPeríodo: {escape(cfg['period'])}\nAs vagas podem mudar; consulte a última observação.\n\nPor onde vamos começar?",
             [
                 await b(label, act)
                 for label, act in [
@@ -192,18 +192,28 @@ async def route(
             ],
         )
     if action == "units":
-        rows, _, _ = await search(s, "", cfg["period"], campus=args.get("campus"))
-        stmt = select(Classroom).where(Classroom.period == cfg["period"])
+        stmt = select(Classroom.units).where(Classroom.period == cfg["period"])
         stmt = (
             stmt.where(Classroom.campus.is_(None))
             if args.get("campus") == "?"
             else stmt.where(Classroom.campus == args.get("campus"))
         )
-        rows = (await s.scalars(stmt)).all()
-        units = sorted({u for c in rows for u in c.units})
+        unit_lists = (await s.scalars(stmt)).all()
+        units = sorted({u for items in unit_lists for u in (items or [])})
+        discovery = await s.get(Setting, "catalog_discovery")
+        unit_names = {
+            u["id"]: u["name"]
+            for u in ((discovery.value if discovery else {}).get("units") or [])
+            if isinstance(u, dict) and "id" in u and "name" in u
+        }
+
+        def _unit_label(uid):
+            name = unit_names.get(uid)
+            return f"{uid} · {name[:36]}" if name and name != uid else uid
+
         page = args.get("page", 0)
         buttons = [
-            await b(u, "results", campus=args.get("campus"), unit=u)
+            await b(_unit_label(u), "results", campus=args.get("campus"), unit=u)
             for u in units[page * 6 : page * 6 + 6]
         ]
         if len(units) > (page + 1) * 6:
@@ -370,12 +380,11 @@ async def route(
     if action == "pause_all":
         r.paused = bool(args["paused"])
         if r.paused:
-            from vagasunb.services import cancel_pending
-
-            for sub in (
-                await s.scalars(select(Subscription).where(Subscription.recipient_id == rid))
-            ).all():
-                await cancel_pending(s, sub.id)
+            await s.execute(
+                update(Outbox)
+                .where(Outbox.recipient_id == rid, Outbox.status.in_(["pending", "retry"]))
+                .values(status="cancelled")
+            )
         return await finish("Preferência de alertas atualizada.", back="subscriptions")
     if action in {"subscription", "sub_action"}:
         sub = await s.get(Subscription, args.get("sid"))

@@ -4,7 +4,7 @@ import asyncio
 import time
 from contextvars import ContextVar
 
-from sqlalchemy import String, cast, func, select, text
+from sqlalchemy import String, cast, func, select, text, update
 
 from vagasunb.db import Outbox, Recipient, Setting, lock, now
 from vagasunb.services import options
@@ -65,10 +65,16 @@ async def dispatch_batch(db, vault, transport, mode, *, limit=100, budget=None):
         try:
             async with db.transaction() as s:
                 cfg = await options(s)
-                if not allowed(cfg, "dispatch", now()) or (
+                current = now()
+                if not allowed(cfg, "dispatch", current) or (
                     mode != "demo" and not getattr(transport, "real_enabled", False)
                 ):
                     return 0
+                await s.execute(
+                    update(Outbox)
+                    .where(Outbox.status == "sending", Outbox.lease < current)
+                    .values(status="uncertain", error="lease_expired")
+                )
                 # Interleave events, order each cohort by a cycle-dependent lottery.
                 # No priority derived from registration date or an external identifier.
                 rank = func.row_number().over(
@@ -84,7 +90,7 @@ async def dispatch_batch(db, vault, transport, mode, *, limit=100, budget=None):
                     )
                     .where(
                         Outbox.status.in_(["pending", "retry"]),
-                        Outbox.due <= now(),
+                        Outbox.due <= current,
                         Outbox.mode == mode,
                     )
                     .subquery()

@@ -33,6 +33,7 @@ services:
     volumes: [demo_postgres:/var/lib/postgresql/data]
     networks: [internal]
     mem_limit: ${DB_MEMORY:-512m}
+    command: [postgres, -c, max_connections=200, -c, shared_buffers=128MB, -c, work_mem=4MB]
     healthcheck:
       test: [CMD-SHELL, "pg_isready -U vagas -d vagas_demo"]
       interval: 5s

@@ -131,6 +131,7 @@ def create_app(settings=None):
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "same-origin",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
         }
         if not request.url.path.startswith("/cloudbeaver"):
             base_headers["X-Frame-Options"] = "DENY"
@@ -420,6 +421,9 @@ def create_app(settings=None):
                 )
             except (VerificationError, ValueError):
                 return auth_page(request, error="Senha inválida. Tente novamente.", status=401)
+            from sqlalchemy import delete
+
+            await s.execute(delete(AdminSession).where(AdminSession.expires <= now()))
             token = secrets.token_urlsafe(32)
             s.add(
                 AdminSession(
@@ -1130,12 +1134,18 @@ def create_app(settings=None):
         filtered_cookie = _forward_cookies(request.headers.get("cookie", ""))
         if filtered_cookie:
             fwd_headers["cookie"] = filtered_cookie
+        clen = request.headers.get("content-length", "")
+        if clen.isdigit() and int(clen) > 10_485_760:
+            raise HTTPException(413, "Payload excede limite")
+        body = await request.body()
+        if len(body) > 10_485_760:
+            raise HTTPException(413, "Payload excede limite")
         try:
             upstream = await app.state.cb_client.request(
                 request.method,
                 target,
                 headers=fwd_headers,
-                content=await request.body(),
+                content=body,
             )
         except httpx.HTTPError:
             return HTMLResponse(

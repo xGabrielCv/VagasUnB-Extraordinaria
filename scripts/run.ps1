@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$NativePgBin,
     [switch]$NoBrowser,
     [switch]$OpenDBeaver

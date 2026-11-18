@@ -333,3 +333,43 @@ async def test_router_slash_buscar_with_query_and_bot_mention(db, vault):
         v2 = await route(s, vault, 909001, text="/buscar@MeuUnBBot DEMO0001", synthetic=True)
         assert "Resultados:" in v2.text and "Resultados: 0" not in v2.text
         assert any("DEMO0001" in btn["label"] for btn in v2.buttons)
+
+
+async def test_concurrent_many_users_registration_search_and_subscribe(db, vault):
+    import asyncio
+    from vagasunb.router import route
+
+    async with db.transaction() as s:
+        await s.merge(
+            Setting(
+                key="catalog_discovery",
+                value={"units": [{"id": "Unidade sintética A", "name": "Instituto Sintético A"}]},
+            )
+        )
+
+    async def simulate_user(idx):
+        chat_id = 880000 + idx
+        async with db.transaction() as s:
+            home = await route(s, vault, chat_id, text="/start", synthetic=True)
+            assert "VagasUnB" in home.text
+        async with db.transaction() as s:
+            res = await route(s, vault, chat_id, text="/buscar DEMO0001", synthetic=True)
+            detail_cb = next(b["callback"] for b in res.buttons if "DEMO0001" in b["label"])
+        async with db.transaction() as s:
+            det = await route(s, vault, chat_id, callback=detail_cb, synthetic=True)
+            conf_cb = next(b["callback"] for b in det.buttons if "disciplina inteira" in b["label"])
+        async with db.transaction() as s:
+            conf = await route(s, vault, chat_id, callback=conf_cb, synthetic=True)
+            act_cb = next(b["callback"] for b in conf.buttons if "Ativar" in b["label"])
+        async with db.transaction() as s:
+            act = await route(s, vault, chat_id, callback=act_cb, synthetic=True)
+            assert "Monitoramento ativado" in act.text
+
+    await asyncio.gather(*(simulate_user(i) for i in range(50)))
+
+    async with db.transaction() as s:
+        cat = await route(s, vault, 880000, text="/catalogo", synthetic=True)
+        cb_campus = cat.buttons[0]["callback"]
+    async with db.transaction() as s:
+        units_view = await route(s, vault, 880000, callback=cb_campus, synthetic=True)
+        assert any("Instituto Sintético A" in b["label"] for b in units_view.buttons)

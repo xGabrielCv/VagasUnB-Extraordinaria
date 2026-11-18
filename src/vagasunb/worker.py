@@ -82,8 +82,9 @@ async def run(settings=None):
     async def dispatcher():
         while not stop.is_set():
             health["dispatch"] = "running"
+            sent = 0
             if cfg.mode == "demo" or real_bot:
-                await dispatch_batch(
+                sent = await dispatch_batch(
                     db,
                     vault,
                     transport,
@@ -97,7 +98,7 @@ async def run(settings=None):
                 if not allowed(ops, "dispatch", now())
                 else ("simulated" if cfg.mode == "demo" else "enabled" if real_bot else "disabled")
             )
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05 if sent else 0.5)
 
     async def cleaner():
         while not stop.is_set():

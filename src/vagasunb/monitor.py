@@ -382,26 +382,26 @@ async def dispatch_once(db, vault, transport, mode, at=None, candidate_pair=None
         from vagasunb.distribution import SendBudget
 
         budget = SendBudget(db)
-    async with db.transaction() as s:
-        cfg = await options(s)
-        if (
-            cfg["dispatch_paused"]
-            or cfg["quarantine"]
-            or (mode != "demo" and not getattr(transport, "real_enabled", False))
-        ):
-            return 0
-        for item in (
-            await s.scalars(
-                select(Outbox)
-                .where(Outbox.status == "sending", Outbox.lease < at)
-                .with_for_update(skip_locked=True)
-            )
-        ).all():
-            item.status, item.error = "uncertain", "lease_expired"
-        candidate = (
-            None
-            if candidate_pair
-            else await s.scalar(
+    if candidate_pair:
+        rid, sid = candidate_pair
+    else:
+        async with db.transaction() as s:
+            cfg = await options(s)
+            if (
+                cfg["dispatch_paused"]
+                or cfg["quarantine"]
+                or (mode != "demo" and not getattr(transport, "real_enabled", False))
+            ):
+                return 0
+            for item in (
+                await s.scalars(
+                    select(Outbox)
+                    .where(Outbox.status == "sending", Outbox.lease < at)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all():
+                item.status, item.error = "uncertain", "lease_expired"
+            candidate = await s.scalar(
                 select(Outbox)
                 .where(
                     Outbox.status.in_(["pending", "retry"]), Outbox.due <= at, Outbox.mode == mode
@@ -409,10 +409,9 @@ async def dispatch_once(db, vault, transport, mode, at=None, candidate_pair=None
                 .order_by(Outbox.due)
                 .limit(1)
             )
-        )
-        if not candidate and not candidate_pair:
-            return 0
-        rid, sid = candidate_pair or (candidate.recipient_id, candidate.subscription_id)
+            if not candidate:
+                return 0
+            rid, sid = candidate.recipient_id, candidate.subscription_id
     # Wait without a claim, recipient lock, transaction or checked-out connection.
     # A deleted recipient cannot be recreated by this path.
     if budget:
@@ -485,7 +484,14 @@ async def dispatch_once(db, vault, transport, mode, at=None, candidate_pair=None
                         valid.remove(item)
                 if not valid:
                     return 0
-                classes = [await s.get(Classroom, i.classroom_id) for i in valid]
+                class_ids = [i.classroom_id for i in valid]
+                class_map = {
+                    c.id: c
+                    for c in (
+                        await s.scalars(select(Classroom).where(Classroom.id.in_(class_ids)))
+                    ).all()
+                }
+                classes = [class_map[cid] for cid in class_ids]
                 from vagasunb.router import alert_view
 
                 view = await alert_view(s, rid, sid, classes)
@@ -522,22 +528,33 @@ async def dispatch_once(db, vault, transport, mode, at=None, candidate_pair=None
                 finally:
                     send_permit.reset(permit)
                 sent_at = at if fixed_time else now()
+                cd_until = sent_at + timedelta(seconds=cfg["cooldown"])
                 for item in valid:
                     item.status, item.sent = (
                         ("simulated" if mode == "demo" else "sent"),
                         sent_at,
                     )
-                    cd = await s.get(Cooldown, (rid, item.classroom_id))
-                    if cd:
-                        cd.until = sent_at + timedelta(seconds=cfg["cooldown"])
-                    else:
-                        s.add(
-                            Cooldown(
-                                recipient_id=rid,
-                                classroom_id=item.classroom_id,
-                                until=sent_at + timedelta(seconds=cfg["cooldown"]),
-                            )
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                cd_rows = list(
+                    {
+                        item.classroom_id: {
+                            "recipient_id": rid,
+                            "classroom_id": item.classroom_id,
+                            "until": cd_until,
+                        }
+                        for item in valid
+                    }.values()
+                )
+                if cd_rows:
+                    await s.execute(
+                        pg_insert(Cooldown)
+                        .values(cd_rows)
+                        .on_conflict_do_update(
+                            index_elements=["recipient_id", "classroom_id"],
+                            set_={"until": cd_until},
                         )
+                    )
                 return len(valid)
         finally:
             from vagasunb.db import release_session_lock

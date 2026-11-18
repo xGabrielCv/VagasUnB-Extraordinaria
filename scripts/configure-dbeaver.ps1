@@ -1,4 +1,4 @@
-param([switch]$EnsureInstalled, [switch]$Open)
+﻿param([switch]$EnsureInstalled, [switch]$Open)
 . "$PSScriptRoot/common.ps1"
 
 function Find-DBeaverExe {

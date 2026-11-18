@@ -157,3 +157,23 @@ def test_placeholder_subrow_merges_without_identity_conflict():
     )
     with pytest.raises(SourceError, match="identity_conflict"):
         parse_results(conflict, "11", "2040.1")
+
+
+async def test_proven_campus_extraction_and_generic_unit_stays_none():
+    form = FORM.replace(
+        '<option value="11">Unidade sintética</option>',
+        '<option value="672">CAMPUS UNB CEILÂNDIA: FACULDADE DE SAÚDE</option>'
+        '<option value="508">DEPARTAMENTO DE CIÊNCIA DA COMPUTAÇÃO</option>',
+    )
+
+    def fake(request):
+        return httpx.Response(200, text="home" if request.url.path == HOME else form + RESULT)
+
+    source = PublicSource(httpx.MockTransport(fake))
+    try:
+        rows_ceil = await source.collect("672", "2040.1", "G")
+        assert rows_ceil[0]["campus"] == "Ceilândia"
+        rows_cic = await source.collect("508", "2040.1", "G")
+        assert rows_cic[0]["campus"] is None
+    finally:
+        await source.aclose()

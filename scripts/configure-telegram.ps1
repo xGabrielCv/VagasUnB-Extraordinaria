@@ -1,4 +1,4 @@
-param([switch]$SaveOnly, [switch]$Public, [switch]$Connect)
+﻿param([switch]$SaveOnly, [switch]$Public, [switch]$Connect)
 . "$PSScriptRoot/common.ps1"
 $secretsDir = if ($Public) { Join-Path $PrivateRoot 'public/secrets' } else { Join-Path $PrivateRoot 'secrets' }
 New-Item -ItemType Directory -Force $secretsDir | Out-Null

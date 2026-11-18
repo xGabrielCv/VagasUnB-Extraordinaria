@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 
 from vagasunb.db import (
     Callback,
@@ -210,8 +210,8 @@ async def subscribe(s, rid, code, period, numbers):
         sub.revision += 1
         await cancel_pending(s, sub.id)
         return sub, False
-    count = len(
-        (await s.scalars(select(Subscription.id).where(Subscription.recipient_id == rid))).all()
+    count = await s.scalar(
+        select(func.count()).select_from(Subscription).where(Subscription.recipient_id == rid)
     )
     if count >= min(cfg["limit"], 10):
         raise ValueError("Limite de 10 disciplinas alcançado; pausadas também contam")
@@ -222,14 +222,11 @@ async def subscribe(s, rid, code, period, numbers):
 
 
 async def cancel_pending(s, sid):
-    for item in (
-        await s.scalars(
-            select(Outbox).where(
-                Outbox.subscription_id == sid, Outbox.status.in_(["pending", "retry"])
-            )
-        )
-    ).all():
-        item.status = "cancelled"
+    await s.execute(
+        update(Outbox)
+        .where(Outbox.subscription_id == sid, Outbox.status.in_(["pending", "retry"]))
+        .values(status="cancelled")
+    )
 
 
 async def subscription_action(s, rid, sid, action, revision=None):

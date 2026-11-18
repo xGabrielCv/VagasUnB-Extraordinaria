@@ -1,3 +1,4 @@
+import os
 import uuid
 from datetime import UTC, datetime
 
@@ -50,6 +51,7 @@ class Classroom(Base):
     __table_args__ = (
         UniqueConstraint("code", "number", "period"),
         Index("ix_classroom_period_code", "period", "code"),
+        Index("ix_classroom_period_campus", "period", "campus"),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     source_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
@@ -99,7 +101,7 @@ class Callback(Base):
     )
     action: Mapped[str] = mapped_column(String(40))
     args: Mapped[dict] = mapped_column(JSON)
-    expires: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class Outbox(Base):
@@ -112,7 +114,9 @@ class Outbox(Base):
     recipient_id: Mapped[str] = mapped_column(
         ForeignKey("recipients.id", ondelete="CASCADE"), index=True
     )
-    subscription_id: Mapped[str] = mapped_column(ForeignKey("subscriptions.id", ondelete="CASCADE"))
+    subscription_id: Mapped[str] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="CASCADE"), index=True
+    )
     classroom_id: Mapped[str] = mapped_column(ForeignKey("classrooms.id", ondelete="CASCADE"))
     cycle: Mapped[int] = mapped_column(Integer)
     revision: Mapped[int] = mapped_column(Integer)
@@ -172,13 +176,19 @@ class AdminSession(Base):
 
 
 class Database:
-    def __init__(self, url):
+    def __init__(self, url, *, pool_size=None, max_overflow=None):
+        ps = pool_size if pool_size is not None else int(os.getenv("VAGAS_DB_POOL_SIZE", "12"))
+        mo = (
+            max_overflow
+            if max_overflow is not None
+            else int(os.getenv("VAGAS_DB_MAX_OVERFLOW", "18"))
+        )
         self.engine = create_async_engine(
             url,
             echo=False,
             pool_pre_ping=True,
-            pool_size=20,
-            max_overflow=30,
+            pool_size=max(2, ps),
+            max_overflow=max(0, mo),
             pool_timeout=15,
             pool_recycle=1800,
             hide_parameters=True,
